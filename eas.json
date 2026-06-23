@@ -10,7 +10,7 @@
       },
       "distribution": "internal",
       "env": {
-        "EXPO_PUBLIC_API_URL": "http://192.168.1.141:4000"
+        "EXPO_PUBLIC_API_URL": "https://mangaapp-bqkx.onrender.com"
       }
     },
     "production": {
@@ -19,7 +19,7 @@
       },
       "autoIncrement": true,
       "env": {
-        "EXPO_PUBLIC_API_URL": "http://192.168.1.141:4000"
+        "EXPO_PUBLIC_API_URL": "https://mangaapp-bqkx.onrender.com"
       }
     }
   },

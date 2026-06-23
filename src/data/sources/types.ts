@@ -52,6 +52,7 @@ export type SearchOptions = {
   lang?: string;
   limit?: number;
   offset?: number;
+  sort?: 'popular' | 'latest';
 };
 
 export type SourceStatus = 'online' | 'slow' | 'broken' | 'disabled';

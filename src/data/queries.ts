@@ -10,20 +10,19 @@ import {
   removeFromLibrary,
   setFavorite,
 } from './local/db';
-import { backend } from './remote/backendClient';
+import { findMatches } from './sources/match';
+import { SourceManager, sourcesInfo } from './sources/registry';
 import type { MangaSearchResult } from './sources/types';
 
 const STALE = 5 * 60 * 1000;
 
-// ---- Remote (backend) queries ----
+// ---- Source queries (run on-device, directly against each site) ----
 
 export function useSourcesQuery() {
   return useQuery({
     queryKey: ['sources'],
-    queryFn: () => backend.getSources(),
-    // Refetch periodically so source health badges stay current.
-    staleTime: 60 * 1000,
-    refetchInterval: 2 * 60 * 1000,
+    queryFn: async () => sourcesInfo(),
+    staleTime: Infinity,
   });
 }
 
@@ -35,7 +34,7 @@ export function useTrending(
 ) {
   return useQuery({
     queryKey: ['trending', sourceId, lang, sort, limit],
-    queryFn: () => backend.getTrending(sourceId, lang, sort, limit),
+    queryFn: () => SourceManager.require(sourceId).trending({ lang, sort, limit }),
     staleTime: STALE,
   });
 }
@@ -43,7 +42,7 @@ export function useTrending(
 export function useSearch(sourceId: string, query: string, lang?: string) {
   return useQuery({
     queryKey: ['search', sourceId, query, lang],
-    queryFn: () => backend.search(sourceId, query, lang),
+    queryFn: () => SourceManager.require(sourceId).search(query, { lang }),
     enabled: query.trim().length > 0,
     staleTime: STALE,
   });
@@ -52,7 +51,7 @@ export function useSearch(sourceId: string, query: string, lang?: string) {
 export function useMatches(title: string | undefined, excludeSourceId: string) {
   return useQuery({
     queryKey: ['match', title, excludeSourceId],
-    queryFn: () => backend.match(title!, excludeSourceId),
+    queryFn: () => findMatches(title!, excludeSourceId),
     enabled: !!title && title.length > 1,
     staleTime: STALE,
   });
@@ -62,7 +61,7 @@ export function useMangaDetails(sourceId: string, externalId: string) {
   return useQuery({
     queryKey: ['manga', sourceId, externalId],
     queryFn: async () => {
-      const details = await backend.getDetails(sourceId, externalId);
+      const details = await SourceManager.require(sourceId).getMangaDetails(externalId);
       await cacheManga({
         source_id: details.sourceId,
         external_id: details.externalId,
@@ -79,7 +78,7 @@ export function useMangaDetails(sourceId: string, externalId: string) {
 export function useChapters(sourceId: string, externalId: string, lang: string) {
   return useQuery({
     queryKey: ['chapters', sourceId, externalId, lang],
-    queryFn: () => backend.getChapters(sourceId, externalId, lang),
+    queryFn: () => SourceManager.require(sourceId).getChapters(externalId, lang),
     staleTime: STALE,
   });
 }
@@ -87,7 +86,7 @@ export function useChapters(sourceId: string, externalId: string, lang: string) 
 export function useChapterPages(sourceId: string, chapterId: string) {
   return useQuery({
     queryKey: ['pages', sourceId, chapterId],
-    queryFn: () => backend.getPages(sourceId, chapterId),
+    queryFn: () => SourceManager.require(sourceId).getChapterPages(chapterId),
     staleTime: 8 * 60 * 1000,
     gcTime: 8 * 60 * 1000,
   });
