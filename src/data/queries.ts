@@ -9,6 +9,8 @@ import {
   getMangaProgress,
   removeFromLibrary,
   setFavorite,
+  setLibraryStatus,
+  type LibraryStatus,
 } from './local/db';
 import { findMatches } from './sources/match';
 import { SourceManager, sourcesInfo } from './sources/registry';
@@ -110,6 +112,68 @@ export function useLibrary() {
   });
 }
 
+export type UpdateItem = {
+  sourceId: string;
+  externalId: string;
+  title: string;
+  coverUrl: string | null;
+  language: string;
+  unread: number;
+  latestNumber?: string;
+  next: { id: string; number?: string } | null;
+  lastReadAt: number | null;
+};
+
+/**
+ * New-chapters feed: for every library title you've STARTED, fetch its chapters
+ * and count how many are newer than your last-read one. Shares the per-manga
+ * chapters cache so it's cheap after browsing.
+ */
+export function useUpdates() {
+  const qc = useQueryClient();
+  return useQuery({
+    queryKey: ['updates'],
+    queryFn: async (): Promise<UpdateItem[]> => {
+      const lib = await getLibrary();
+      const started = lib.filter((m) => m.chapter_number != null);
+      const items = await Promise.all(
+        started.map(async (m) => {
+          const lang = m.language || 'en';
+          try {
+            const chapters = await qc.fetchQuery({
+              queryKey: ['chapters', m.source_id, m.external_id, lang],
+              queryFn: () => SourceManager.require(m.source_id).getChapters(m.external_id, lang),
+              staleTime: STALE,
+            });
+            if (!chapters.length) return null;
+            const lastRead = Number(m.chapter_number);
+            const unread = chapters.filter((c) => Number(c.chapterNumber) > lastRead);
+            if (unread.length === 0) return null;
+            const next = unread[0];
+            return {
+              sourceId: m.source_id,
+              externalId: m.external_id,
+              title: m.title,
+              coverUrl: m.cover_url,
+              language: lang,
+              unread: unread.length,
+              latestNumber: chapters[chapters.length - 1].chapterNumber,
+              next: { id: next.externalId, number: next.chapterNumber },
+              lastReadAt: m.last_read_at,
+            } as UpdateItem;
+          } catch {
+            return null;
+          }
+        }),
+      );
+      return items
+        .filter((x): x is UpdateItem => x !== null)
+        .sort((a, b) => b.unread - a.unread || (b.lastReadAt ?? 0) - (a.lastReadAt ?? 0));
+    },
+    staleTime: STALE,
+  });
+}
+
 export function useMangaProgress(sourceId: string, externalId: string) {
   return useQuery({
     queryKey: ['progress', sourceId, externalId],
@@ -123,6 +187,26 @@ export function useLibraryStatus(sourceId: string, externalId: string) {
     queryKey: ['library-status', sourceId, externalId],
     queryFn: () => getLibraryStatus(sourceId, externalId),
     staleTime: 0,
+  });
+}
+
+export function useSetLibraryStatus(sourceId: string, externalId: string, manga: MangaSearchResult) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (status: LibraryStatus) => {
+      await cacheManga({
+        source_id: manga.sourceId,
+        external_id: manga.externalId,
+        title: manga.title,
+        cover_url: manga.coverUrl ?? null,
+        description: manga.description ?? null,
+      });
+      await setLibraryStatus(sourceId, externalId, status);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['library-status', sourceId, externalId] });
+      qc.invalidateQueries({ queryKey: ['library'] });
+    },
   });
 }
 

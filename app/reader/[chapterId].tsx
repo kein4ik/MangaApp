@@ -17,6 +17,13 @@ import {
   type ViewToken,
 } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import Animated, {
+  runOnJS,
+  useAnimatedReaction,
+  useAnimatedStyle,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { BottomSheet } from '@/components/BottomSheet';
@@ -219,12 +226,85 @@ export default function ReaderScreen() {
     setCurrentPage(rtl ? total - 1 - visual : visual);
   };
 
-  // A real tap (finger doesn't move) toggles the toolbars; scrolling passes
-  // straight through to the list. runOnJS so we can call React state setters.
-  const tapGesture = Gesture.Tap()
+  // ----- Zoom: pinch + double-tap, with pan when zoomed -----
+  const scale = useSharedValue(1);
+  const savedScale = useSharedValue(1);
+  const tx = useSharedValue(0);
+  const ty = useSharedValue(0);
+  const sx = useSharedValue(0);
+  const sy = useSharedValue(0);
+  const [zoomed, setZoomed] = useState(false);
+
+  useAnimatedReaction(
+    () => scale.value > 1.01,
+    (z, prev) => {
+      if (z !== prev) runOnJS(setZoomed)(z);
+    },
+  );
+
+  const zoomStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: tx.value }, { translateY: ty.value }, { scale: scale.value }],
+  }));
+
+  const resetZoom = () => {
+    'worklet';
+    scale.value = withTiming(1);
+    savedScale.value = 1;
+    tx.value = withTiming(0);
+    ty.value = withTiming(0);
+    sx.value = 0;
+    sy.value = 0;
+  };
+
+  // Reset zoom when the chapter changes (same screen is reused).
+  useEffect(() => {
+    scale.value = 1;
+    savedScale.value = 1;
+    tx.value = 0;
+    ty.value = 0;
+    sx.value = 0;
+    sy.value = 0;
+    setZoomed(false);
+  }, [chapterId, scale, savedScale, tx, ty, sx, sy]);
+
+  const pinch = Gesture.Pinch()
+    .onUpdate((e) => {
+      scale.value = Math.min(Math.max(savedScale.value * e.scale, 1), 4);
+    })
+    .onEnd(() => {
+      savedScale.value = scale.value;
+      if (scale.value <= 1.01) resetZoom();
+    });
+
+  const pan = Gesture.Pan()
+    .enabled(zoomed)
+    .onUpdate((e) => {
+      tx.value = sx.value + e.translationX;
+      ty.value = sy.value + e.translationY;
+    })
+    .onEnd(() => {
+      sx.value = tx.value;
+      sy.value = ty.value;
+    });
+
+  const doubleTap = Gesture.Tap()
+    .numberOfTaps(2)
+    .onEnd(() => {
+      if (scale.value > 1.01) resetZoom();
+      else {
+        scale.value = withTiming(2.5);
+        savedScale.value = 2.5;
+      }
+    });
+
+  // Single tap toggles toolbars; waits for double-tap to fail first.
+  const singleTap = Gesture.Tap()
+    .numberOfTaps(1)
     .maxDuration(220)
     .runOnJS(true)
     .onEnd(() => setChromeVisible((v) => !v));
+
+  const gesture = Gesture.Simultaneous(pinch, pan, Gesture.Exclusive(doubleTap, singleTap));
 
   if (isLoading) {
     return (
@@ -251,7 +331,8 @@ export default function ReaderScreen() {
 
   return (
     <View style={styles.screen}>
-      <GestureDetector gesture={tapGesture}>
+      <GestureDetector gesture={gesture}>
+        <Animated.View style={[styles.zoomLayer, zoomStyle]}>
         {mode === 'paged' ? (
           <FlatList
             key={`paged-${chapterId}-${direction}`}
@@ -260,6 +341,7 @@ export default function ReaderScreen() {
             renderItem={({ item }) => <PagedImage page={item} />}
             horizontal
             pagingEnabled
+            scrollEnabled={!zoomed}
             showsHorizontalScrollIndicator={false}
             initialScrollIndex={toVisual(currentPage)}
             getItemLayout={(_, i) => ({ length: SCREEN_W, offset: SCREEN_W * i, index: i })}
@@ -275,6 +357,7 @@ export default function ReaderScreen() {
             keyExtractor={(item) => String(item.index)}
             renderItem={renderItem}
             initialScrollIndex={currentPage}
+            scrollEnabled={!zoomed}
             onViewableItemsChanged={onViewableItemsChanged}
             viewabilityConfig={viewabilityConfig}
             showsVerticalScrollIndicator={false}
@@ -298,6 +381,7 @@ export default function ReaderScreen() {
             }
           />
         )}
+        </Animated.View>
       </GestureDetector>
 
       {/* Brightness dim overlay over the pages (taps pass through). */}
@@ -395,6 +479,7 @@ export default function ReaderScreen() {
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: '#000' },
+  zoomLayer: { flex: 1 },
   pagedSlide: {
     width: SCREEN_W,
     height: SCREEN_H,

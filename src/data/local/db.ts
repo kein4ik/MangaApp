@@ -165,14 +165,14 @@ export async function clearLibrary(): Promise<void> {
 export async function getLibraryStatus(
   sourceId: string,
   mangaExternalId: string,
-): Promise<{ inLibrary: boolean; favorite: boolean }> {
+): Promise<{ inLibrary: boolean; favorite: boolean; status: string | null }> {
   const db = await getDb();
-  const row = await db.getFirstAsync<{ favorite: number }>(
-    `SELECT favorite FROM library_items WHERE source_id = ? AND manga_external_id = ?`,
+  const row = await db.getFirstAsync<{ favorite: number; status: string }>(
+    `SELECT favorite, status FROM library_items WHERE source_id = ? AND manga_external_id = ?`,
     sourceId,
     mangaExternalId,
   );
-  return { inLibrary: !!row, favorite: (row?.favorite ?? 0) === 1 };
+  return { inLibrary: !!row, favorite: (row?.favorite ?? 0) === 1, status: row?.status ?? null };
 }
 
 /** Toggle favourite, adding the title to the library if it isn't there yet. */
@@ -223,24 +223,53 @@ export async function removeFromLibrary(
   );
 }
 
+/** Reading-status categories for a library title. */
+export type LibraryStatus = 'reading' | 'plan' | 'completed' | 'on_hold' | 'dropped';
+
+export async function setLibraryStatus(
+  sourceId: string,
+  mangaExternalId: string,
+  status: LibraryStatus,
+): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(
+    `INSERT OR IGNORE INTO library_items
+      (source_id, manga_external_id, status, favorite, last_read_at, dirty_for_sync)
+     VALUES (?, ?, 'reading', 0, ?, 1)`,
+    sourceId,
+    mangaExternalId,
+    Date.now(),
+  );
+  await db.runAsync(
+    `UPDATE library_items SET status = ?, dirty_for_sync = 1
+     WHERE source_id = ? AND manga_external_id = ?`,
+    status,
+    sourceId,
+    mangaExternalId,
+  );
+}
+
+export type LibraryRow = {
+  source_id: string;
+  external_id: string;
+  title: string;
+  cover_url: string | null;
+  favorite: number;
+  status: string;
+  last_read_at: number | null;
+  chapter_id: string | null;
+  chapter_number: string | null;
+  language: string | null;
+  percent: number | null;
+};
+
 /** Library rows joined with their cached manga + latest progress, recent first. */
-export async function getLibrary(): Promise<
-  {
-    source_id: string;
-    external_id: string;
-    title: string;
-    cover_url: string | null;
-    favorite: number;
-    last_read_at: number | null;
-    chapter_number: string | null;
-    percent: number | null;
-  }[]
-> {
+export async function getLibrary(): Promise<LibraryRow[]> {
   const db = await getDb();
   return db.getAllAsync(
-    `SELECT l.source_id, l.manga_external_id AS external_id, l.favorite, l.last_read_at,
+    `SELECT l.source_id, l.manga_external_id AS external_id, l.favorite, l.status, l.last_read_at,
             m.title, m.cover_url,
-            p.chapter_number, p.percent
+            p.chapter_id, p.chapter_number, p.language, p.percent
      FROM library_items l
      JOIN cached_manga m
        ON m.source_id = l.source_id AND m.external_id = l.manga_external_id

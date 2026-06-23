@@ -1,23 +1,39 @@
 import { Image } from 'expo-image';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useMemo, useState } from 'react';
-import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { FlatList, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useLibrary } from '@/data/queries';
+import type { LibraryRow } from '@/data/local/db';
 import { imageSource } from '@/lib/imageSource';
 import { sourceMeta } from '@/lib/sourceMeta';
 import { timeAgo } from '@/lib/time';
 import { colors, radius, spacing } from '@/theme/colors';
 import { typography } from '@/theme/typography';
 
-type Tab = 'recent' | 'favourites' | 'downloads';
+const CATEGORIES = [
+  { key: 'all', label: 'All' },
+  { key: 'reading', label: 'Reading' },
+  { key: 'plan', label: 'Plan to read' },
+  { key: 'on_hold', label: 'On hold' },
+  { key: 'completed', label: 'Completed' },
+  { key: 'dropped', label: 'Dropped' },
+  { key: 'favourites', label: 'Favourites' },
+] as const;
+type CatKey = (typeof CATEGORIES)[number]['key'];
+
+function matches(item: LibraryRow, cat: CatKey): boolean {
+  if (cat === 'all') return true;
+  if (cat === 'favourites') return item.favorite === 1;
+  return item.status === cat;
+}
 
 export default function LibraryScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { data, refetch } = useLibrary();
-  const [tab, setTab] = useState<Tab>('recent');
+  const [cat, setCat] = useState<CatKey>('all');
 
   useFocusEffect(
     useCallback(() => {
@@ -25,46 +41,55 @@ export default function LibraryScreen() {
     }, [refetch]),
   );
 
-  const all = data ?? [];
-  const favourites = useMemo(() => all.filter((i) => i.favorite === 1), [all]);
-  const list = tab === 'favourites' ? favourites : all;
+  const all = useMemo(() => data ?? [], [data]);
+  const list = useMemo(() => all.filter((i) => matches(i, cat)), [all, cat]);
+  const countFor = (k: CatKey) => all.filter((i) => matches(i, k)).length;
 
   return (
     <View style={[styles.screen, { paddingTop: insets.top + spacing.md }]}>
       <Text style={styles.title}>My Library</Text>
 
-      <View style={styles.tabs}>
-        <Tab label="Recent" count={all.length} active={tab === 'recent'} onPress={() => setTab('recent')} />
-        <Tab
-          label="Favourites"
-          count={favourites.length}
-          active={tab === 'favourites'}
-          onPress={() => setTab('favourites')}
-        />
-        <Tab label="Downloads" count={0} active={tab === 'downloads'} onPress={() => setTab('downloads')} />
+      <View>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.chips}
+        >
+          {CATEGORIES.map((c) => {
+            const active = c.key === cat;
+            const n = countFor(c.key);
+            return (
+              <Pressable
+                key={c.key}
+                style={[styles.chip, active && styles.chipActive]}
+                onPress={() => setCat(c.key)}
+              >
+                <Text style={[styles.chipText, active && styles.chipTextActive]}>
+                  {c.label}
+                  {n > 0 ? ` ${n}` : ''}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
       </View>
 
-      {tab === 'downloads' ? (
-        <View style={styles.empty}>
-          <Text style={styles.emptyText}>Downloads</Text>
-          <Text style={styles.emptyHint}>Offline downloads are coming soon.</Text>
-        </View>
-      ) : list.length === 0 ? (
+      {list.length === 0 ? (
         <View style={styles.empty}>
           <Text style={styles.emptyText}>
-            {tab === 'favourites' ? 'No favourites yet' : 'Your library is empty'}
+            {cat === 'all' ? 'Your library is empty' : 'Nothing here yet'}
           </Text>
           <Text style={styles.emptyHint}>
-            {tab === 'favourites'
-              ? 'Tap ♡ on any manga to add it here.'
-              : 'Add manga from any details page.'}
+            {cat === 'all'
+              ? 'Add manga from any details page.'
+              : 'Set a status on a manga’s page to file it here.'}
           </Text>
         </View>
       ) : (
         <FlatList
           data={list}
           keyExtractor={(item) => `${item.source_id}:${item.external_id}`}
-          contentContainerStyle={{ paddingBottom: spacing.xxl }}
+          contentContainerStyle={{ paddingBottom: insets.bottom + spacing.xxl }}
           renderItem={({ item }) => {
             const pct = Math.round((item.percent ?? 0) * 100);
             return (
@@ -77,11 +102,7 @@ export default function LibraryScreen() {
                   })
                 }
               >
-                <Image
-                  source={imageSource(item.cover_url)}
-                  style={styles.cover}
-                  contentFit="cover"
-                />
+                <Image source={imageSource(item.cover_url)} style={styles.cover} contentFit="cover" />
                 <View style={styles.rowInfo}>
                   <Text style={styles.rowTitle} numberOfLines={1}>{item.title}</Text>
                   <View style={styles.rowMetaLine}>
@@ -105,50 +126,20 @@ export default function LibraryScreen() {
   );
 }
 
-function Tab({
-  label,
-  count,
-  active,
-  onPress,
-}: {
-  label: string;
-  count: number;
-  active: boolean;
-  onPress: () => void;
-}) {
-  return (
-    <Pressable onPress={onPress} style={styles.tab}>
-      <Text style={[styles.tabText, active && styles.tabTextActive]}>
-        {label}
-        {count > 0 ? ` (${count})` : ''}
-      </Text>
-      {active && <View style={styles.tabUnderline} />}
-    </Pressable>
-  );
-}
-
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg },
   title: { ...typography.h1, color: colors.text, paddingHorizontal: spacing.lg },
 
-  tabs: {
-    flexDirection: 'row',
-    gap: spacing.lg,
-    paddingHorizontal: spacing.lg,
-    marginTop: spacing.md,
-    marginBottom: spacing.sm,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.border,
+  chips: { gap: spacing.sm, paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
+  chip: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.pill,
+    backgroundColor: colors.card,
   },
-  tab: { paddingBottom: spacing.sm },
-  tabText: { ...typography.bodyStrong, color: colors.textFaint },
-  tabTextActive: { color: colors.text },
-  tabUnderline: {
-    height: 2,
-    borderRadius: 2,
-    backgroundColor: colors.accent,
-    marginTop: spacing.sm,
-  },
+  chipActive: { backgroundColor: colors.accentMuted },
+  chipText: { ...typography.caption, color: colors.textMuted, fontWeight: '600' },
+  chipTextActive: { color: colors.accent },
 
   row: {
     flexDirection: 'row',

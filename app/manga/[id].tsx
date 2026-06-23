@@ -21,14 +21,26 @@ import {
   useMangaDetails,
   useMangaProgress,
   useMatches,
+  useSetLibraryStatus,
   useSourcesQuery,
   useToggleFavorite,
   useToggleLibrary,
 } from '@/data/queries';
+import type { LibraryStatus } from '@/data/local/db';
+import { BottomSheet } from '@/components/BottomSheet';
 import { sourceMeta } from '@/lib/sourceMeta';
 import { useSettings } from '@/store/settings.store';
 import { colors, radius, spacing } from '@/theme/colors';
 import { typography } from '@/theme/typography';
+
+const STATUS_LABELS: Record<LibraryStatus, string> = {
+  reading: 'Reading',
+  plan: 'Plan to read',
+  on_hold: 'On hold',
+  completed: 'Completed',
+  dropped: 'Dropped',
+};
+const STATUS_KEYS = Object.keys(STATUS_LABELS) as LibraryStatus[];
 
 export default function MangaDetailsScreen() {
   const router = useRouter();
@@ -56,7 +68,9 @@ export default function MangaDetailsScreen() {
   const toggleLibrary = useToggleLibrary(mangaRef);
   const libStatus = useLibraryStatus(sourceId, id);
   const toggleFavorite = useToggleFavorite(mangaRef);
+  const setStatus = useSetLibraryStatus(sourceId, id, mangaRef);
   const matches = useMatches(details.data?.title, sourceId);
+  const [statusOpen, setStatusOpen] = useState(false);
 
   const lastChapterId = progress.data?.chapter_id;
 
@@ -189,12 +203,12 @@ export default function MangaDetailsScreen() {
                   {libStatus.data?.favorite ? '♥' : '♡'}
                 </Text>
               </Pressable>
-              <Pressable
-                style={styles.secondaryBtn}
-                onPress={() => toggleLibrary.mutate(libStatus.data?.inLibrary ?? false)}
-              >
+              <Pressable style={styles.secondaryBtn} onPress={() => setStatusOpen(true)}>
                 <Text style={styles.secondaryBtnText}>
-                  {libStatus.data?.inLibrary ? '✓ Library' : '+ Library'}
+                  {libStatus.data?.inLibrary
+                    ? STATUS_LABELS[(libStatus.data.status as LibraryStatus) ?? 'reading'] ?? 'In Library'
+                    : '+ Library'}{' '}
+                  ▾
                 </Text>
               </Pressable>
             </View>
@@ -320,6 +334,38 @@ export default function MangaDetailsScreen() {
           );
         }}
       />
+
+      <BottomSheet visible={statusOpen} title="Status" onClose={() => setStatusOpen(false)}>
+        {STATUS_KEYS.map((key) => {
+          const active = libStatus.data?.inLibrary && (libStatus.data.status ?? 'reading') === key;
+          return (
+            <Pressable
+              key={key}
+              style={[styles.statusRow, active && styles.statusRowActive]}
+              onPress={() => {
+                setStatus.mutate(key);
+                setStatusOpen(false);
+              }}
+            >
+              <Text style={[styles.statusRowText, active && { color: colors.accent }]}>
+                {STATUS_LABELS[key]}
+              </Text>
+              {active && <Text style={styles.statusCheck}>✓</Text>}
+            </Pressable>
+          );
+        })}
+        {libStatus.data?.inLibrary && (
+          <Pressable
+            style={styles.statusRow}
+            onPress={() => {
+              toggleLibrary.mutate(true);
+              setStatusOpen(false);
+            }}
+          >
+            <Text style={[styles.statusRowText, { color: colors.danger }]}>Remove from library</Text>
+          </Pressable>
+        )}
+      </BottomSheet>
     </>
   );
 }
@@ -446,4 +492,15 @@ const styles = StyleSheet.create({
   chapterTitle: { ...typography.body, color: colors.text },
   chapterMeta: { ...typography.caption, color: colors.textFaint, marginTop: 2 },
   currentTag: { ...typography.tiny, color: colors.accent, textTransform: 'uppercase' },
+  statusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.sm,
+    borderRadius: radius.md,
+  },
+  statusRowActive: { backgroundColor: colors.card },
+  statusRowText: { ...typography.body, color: colors.text },
+  statusCheck: { ...typography.bodyStrong, color: colors.accent },
 });
