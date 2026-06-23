@@ -22,7 +22,10 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BottomSheet } from '@/components/BottomSheet';
 import { ReaderSettingsSheet } from '@/components/ReaderSettingsSheet';
 
+import { useQueryClient } from '@tanstack/react-query';
+
 import { useChapterPages, useChapters } from '@/data/queries';
+import { SourceManager } from '@/data/sources/registry';
 import { saveProgress } from '@/data/local/db';
 import { useReaderSettings } from '@/store/reader.store';
 import { useSettings } from '@/store/settings.store';
@@ -129,6 +132,17 @@ export default function ReaderScreen() {
   const prevChapter = idx > 0 ? chapters?.[idx - 1] : undefined;
   const nextChapter =
     idx >= 0 && chapters && idx < chapters.length - 1 ? chapters[idx + 1] : undefined;
+
+  // Prefetch the NEXT chapter's page list so tapping "next" opens instantly.
+  const qc = useQueryClient();
+  useEffect(() => {
+    if (!nextChapter) return;
+    qc.prefetchQuery({
+      queryKey: ['pages', sourceId, nextChapter.externalId],
+      queryFn: () => SourceManager.require(sourceId).getChapterPages(nextChapter.externalId),
+      staleTime: 8 * 60 * 1000,
+    }).catch(() => {});
+  }, [qc, sourceId, nextChapter?.externalId]);
 
   const [currentPage, setCurrentPage] = useState(Number(params.startPage ?? 0));
   const [chromeVisible, setChromeVisible] = useState(true);

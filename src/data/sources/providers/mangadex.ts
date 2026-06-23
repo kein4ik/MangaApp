@@ -132,10 +132,8 @@ export class MangaDexProvider implements SourceProvider {
   }
 
   async getChapters(externalId: string, lang = 'en'): Promise<Chapter[]> {
-    const all: Chapter[] = [];
-    let offset = 0;
     const limit = 100;
-    for (let page = 0; page < 10; page++) {
+    const feedUrl = (offset: number) => {
       const p = new URLSearchParams();
       p.set('limit', String(limit));
       p.set('offset', String(offset));
@@ -145,9 +143,20 @@ export class MangaDexProvider implements SourceProvider {
       p.append('contentRating[]', 'safe');
       p.append('contentRating[]', 'suggestive');
       p.append('contentRating[]', 'erotica');
-      const data = await getJSON<{ data: MdChapter[]; total: number }>(
-        `${API}/manga/${externalId}/feed?${p}`,
-      );
+      return `${API}/manga/${externalId}/feed?${p}`;
+    };
+
+    // Fetch page 1 to learn the total, then pull the rest in PARALLEL — a
+    // 1000-chapter series loads in one round-trip instead of ten.
+    const first = await getJSON<{ data: MdChapter[]; total: number }>(feedUrl(0));
+    const offsets: number[] = [];
+    for (let o = limit; o < first.total && o < limit * 20; o += limit) offsets.push(o);
+    const rest = await Promise.all(
+      offsets.map((o) => getJSON<{ data: MdChapter[]; total: number }>(feedUrl(o))),
+    );
+
+    const all: Chapter[] = [];
+    for (const data of [first, ...rest]) {
       for (const ch of data.data) {
         if (ch.attributes.externalUrl) continue;
         const group = ch.relationships.find((r) => r.type === 'scanlation_group');
@@ -163,8 +172,6 @@ export class MangaDexProvider implements SourceProvider {
           scanlationGroup: group?.attributes?.name,
         });
       }
-      offset += limit;
-      if (offset >= data.total) break;
     }
     return all;
   }
