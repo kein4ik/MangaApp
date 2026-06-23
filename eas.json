@@ -1,0 +1,29 @@
+{
+  "cli": {
+    "version": ">= 12.0.0",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "preview": {
+      "android": {
+        "buildType": "apk"
+      },
+      "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_API_URL": "http://192.168.1.141:4000"
+      }
+    },
+    "production": {
+      "android": {
+        "buildType": "app-bundle"
+      },
+      "autoIncrement": true,
+      "env": {
+        "EXPO_PUBLIC_API_URL": "http://192.168.1.141:4000"
+      }
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}

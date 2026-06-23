@@ -1,0 +1,14 @@
+# Render Blueprint — deploys the MangaApp backend.
+# In Render: New + → Blueprint → connect this repo. Render reads this file.
+services:
+  - type: web
+    name: mangaapp-backend
+    runtime: node
+    rootDir: backend
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: '20'
