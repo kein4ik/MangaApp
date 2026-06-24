@@ -25,7 +25,7 @@ export default function SourcesScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const sourcesQ = useSourcesQuery();
-  const { selectedSourceId, language, setSource, setLanguage } = useSettings();
+  const { selectedSourceId, language, hiddenSources, setSource, setLanguage } = useSettings();
 
   const [viewLang, setViewLang] = useState(language);
 
@@ -40,8 +40,11 @@ export default function SourcesScreen() {
   }, [sourcesQ.data]);
 
   const sourcesForLang = useMemo(
-    () => sourcesQ.data?.filter((s) => s.languages.includes(viewLang)) ?? [],
-    [sourcesQ.data, viewLang],
+    () =>
+      sourcesQ.data?.filter(
+        (s) => s.languages.includes(viewLang) && !hiddenSources.includes(s.id),
+      ) ?? [],
+    [sourcesQ.data, viewLang, hiddenSources],
   );
 
   const pickSource = (id: string) => {

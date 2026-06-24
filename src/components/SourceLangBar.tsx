@@ -17,11 +17,13 @@ import { languageLabel } from './languages';
  * offer the current one — we never silently mix sources/languages.
  */
 export function SourceLangBar() {
-  const { selectedSourceId, language, setSource, setLanguage } = useSettings();
+  const { selectedSourceId, language, hiddenSources, setSource, setLanguage } = useSettings();
   const sources = useSourcesQuery();
   const [sourceOpen, setSourceOpen] = useState(false);
   const [langOpen, setLangOpen] = useState(false);
 
+  // Don't offer sources the user has hidden in diagnostics.
+  const visibleSources = sources.data?.filter((s) => !hiddenSources.includes(s.id));
   const current = sources.data?.find((s) => s.id === selectedSourceId);
   const langs = current?.languages ?? ['en'];
 
@@ -63,9 +65,8 @@ export function SourceLangBar() {
 
       {/* Source selector */}
       <BottomSheet visible={sourceOpen} title="Source" onClose={() => setSourceOpen(false)}>
-        {sources.isError && <Text style={styles.error}>Backend unreachable. Is it running?</Text>}
         <ScrollView style={{ maxHeight: 360 }}>
-          {sources.data?.map((s) => {
+          {visibleSources?.map((s) => {
             const active = s.id === selectedSourceId;
             return (
               <Pressable

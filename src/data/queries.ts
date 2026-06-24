@@ -59,6 +59,33 @@ export function useMatches(title: string | undefined, excludeSourceId: string) {
   });
 }
 
+/**
+ * Cross-source progress: if you've read this title on ANOTHER source (found via
+ * matches), return the furthest chapter number you reached there — so we can
+ * offer to resume at roughly that chapter on the current source.
+ */
+export function useCrossSourceProgress(matches: MangaSearchResult[] | undefined) {
+  const key = (matches ?? []).map((m) => `${m.sourceId}:${m.externalId}`).join(',');
+  return useQuery({
+    queryKey: ['cross-progress', key],
+    enabled: !!matches && matches.length > 0,
+    queryFn: async () => {
+      const rows = await Promise.all(
+        (matches ?? []).map(async (m) => {
+          const p = await getMangaProgress(m.sourceId, m.externalId);
+          const num = p?.chapter_number ? Number(p.chapter_number) : NaN;
+          return p && !isNaN(num)
+            ? { sourceId: m.sourceId, chapterNumber: p.chapter_number, num }
+            : null;
+        }),
+      );
+      const valid = rows.filter((x): x is NonNullable<typeof x> => x !== null);
+      return valid.sort((a, b) => b.num - a.num)[0] ?? null;
+    },
+    staleTime: 0,
+  });
+}
+
 export function useMangaDetails(sourceId: string, externalId: string) {
   return useQuery({
     queryKey: ['manga', sourceId, externalId],

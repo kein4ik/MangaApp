@@ -1,7 +1,7 @@
 import { useQueryClient } from '@tanstack/react-query';
 import Constants from 'expo-constants';
 import { Image } from 'expo-image';
-import { Stack } from 'expo-router';
+import { Stack, useRouter } from 'expo-router';
 import {
   Alert,
   Pressable,
@@ -24,6 +24,7 @@ const SOURCES = ['mangadex', 'mangapill', 'mangalib', 'remanga', 'mangabuff'];
 
 export default function SettingsScreen() {
   const qc = useQueryClient();
+  const router = useRouter();
   const insets = useSafeAreaInsets();
   const reader = useReaderSettings();
   const { recent, clearRecent } = useSearchHistory();
@@ -72,6 +73,11 @@ export default function SettingsScreen() {
             value={reader.keepAwake}
             onChange={reader.setKeepAwake}
           />
+        </Section>
+
+        {/* ---------- Sources ---------- */}
+        <Section title="Sources">
+          <ActionRow label="Source diagnostics" onPress={() => router.push('/diagnostics')} />
         </Section>
 
         {/* ---------- Data ---------- */}

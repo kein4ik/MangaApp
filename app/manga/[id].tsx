@@ -17,6 +17,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import {
   useChapters,
+  useCrossSourceProgress,
   useLibraryStatus,
   useMangaDetails,
   useMangaProgress,
@@ -27,6 +28,7 @@ import {
   useToggleLibrary,
 } from '@/data/queries';
 import type { LibraryStatus } from '@/data/local/db';
+import type { Chapter } from '@/data/sources/types';
 import { BottomSheet } from '@/components/BottomSheet';
 import { sourceMeta } from '@/lib/sourceMeta';
 import { useSettings } from '@/store/settings.store';
@@ -70,6 +72,7 @@ export default function MangaDetailsScreen() {
   const toggleFavorite = useToggleFavorite(mangaRef);
   const setStatus = useSetLibraryStatus(sourceId, id, mangaRef);
   const matches = useMatches(details.data?.title, sourceId);
+  const crossProgress = useCrossSourceProgress(matches.data);
   const [statusOpen, setStatusOpen] = useState(false);
 
   const lastChapterId = progress.data?.chapter_id;
@@ -89,6 +92,24 @@ export default function MangaDetailsScreen() {
     }
     return newestFirst ? [...list].reverse() : list;
   }, [chapters.data, chapterQuery, newestFirst]);
+
+  // Cross-source resume: read elsewhere but not here → find the closest chapter.
+  const crossResume = useMemo(() => {
+    if (lastChapterId || !crossProgress.data || !chapters.data?.length) return null;
+    const target = crossProgress.data.num;
+    let best: Chapter | null = null;
+    let bestDiff = Infinity;
+    for (const c of chapters.data) {
+      const n = Number(c.chapterNumber);
+      if (isNaN(n)) continue;
+      const d = Math.abs(n - target);
+      if (d < bestDiff) {
+        bestDiff = d;
+        best = c;
+      }
+    }
+    return best ? { chapter: best, from: crossProgress.data } : null;
+  }, [lastChapterId, crossProgress.data, chapters.data]);
 
   const headerSubtitle = useMemo(() => {
     if (!details.data) return '';
@@ -249,6 +270,33 @@ export default function MangaDetailsScreen() {
                   ))}
                 </View>
               </View>
+            )}
+
+            {crossResume && (
+              <Pressable
+                style={styles.crossBanner}
+                onPress={() =>
+                  router.push({
+                    pathname: '/reader/[chapterId]',
+                    params: {
+                      chapterId: crossResume.chapter.externalId,
+                      sourceId,
+                      mangaId: id,
+                      chapterNumber: crossResume.chapter.chapterNumber ?? '',
+                      lang: language,
+                      startPage: '0',
+                    },
+                  })
+                }
+              >
+                <Text style={styles.crossBannerText}>
+                  You’re at chapter {crossResume.from.chapterNumber} on{' '}
+                  {sourceMeta(crossResume.from.sourceId).name}
+                </Text>
+                <Text style={styles.crossBannerCta}>
+                  Resume here from ch. {crossResume.chapter.chapterNumber} ›
+                </Text>
+              </Pressable>
             )}
 
             {canRead && (
@@ -503,4 +551,16 @@ const styles = StyleSheet.create({
   statusRowActive: { backgroundColor: colors.card },
   statusRowText: { ...typography.body, color: colors.text },
   statusCheck: { ...typography.bodyStrong, color: colors.accent },
+  crossBanner: {
+    marginHorizontal: spacing.lg,
+    marginTop: spacing.lg,
+    padding: spacing.md,
+    borderRadius: radius.md,
+    backgroundColor: colors.accentMuted,
+    borderLeftWidth: 3,
+    borderLeftColor: colors.accent,
+    gap: 3,
+  },
+  crossBannerText: { ...typography.caption, color: colors.textMuted },
+  crossBannerCta: { ...typography.bodyStrong, color: colors.accent },
 });

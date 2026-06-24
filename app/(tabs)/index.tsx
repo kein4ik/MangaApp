@@ -1,5 +1,5 @@
-import { useRouter } from 'expo-router';
-import { useMemo, useState } from 'react';
+import { useFocusEffect, useRouter } from 'expo-router';
+import { useCallback, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -33,6 +33,15 @@ export default function HomeScreen() {
   const top = useTrending(selectedSourceId, language, 'popular');
   const latest = useTrending(selectedSourceId, language, 'latest');
   const continueReading = useContinueReading();
+
+  // Refresh "Continue reading" whenever Home regains focus (e.g. after reading
+  // a chapter) so newly-read titles show up immediately, not after a refresh.
+  const refetchContinue = continueReading.refetch;
+  useFocusEffect(
+    useCallback(() => {
+      refetchContinue();
+    }, [refetchContinue]),
+  );
 
   const [filter, setFilter] = useState<HistoryFilter>('all');
   const history = useMemo(() => {

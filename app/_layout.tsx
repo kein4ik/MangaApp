@@ -59,6 +59,7 @@ export default function RootLayout() {
             />
             <Stack.Screen name="settings" />
             <Stack.Screen name="top" />
+            <Stack.Screen name="diagnostics" />
           </Stack>
         </PersistQueryClientProvider>
       </SafeAreaProvider>
