@@ -25,11 +25,21 @@ function score(query: string, candidate: string): number {
   return subset ? Math.max(jaccard, 0.6) : jaccard;
 }
 
+// Fan-made / derivative titles that share a name but aren't the same work.
+const JUNK =
+  /(doujin|додзин|parody|пародия|\bdj\b|fan\s?book|art\s?book|артбук|databook|guide\s?book|anthology|антологи|omake|spin[-\s]?off|спин[-\s]?офф|crossover|кроссовер)/i;
+
+function isJunk(result: MangaSearchResult, query: string): boolean {
+  if (JUNK.test(query)) return false; // user explicitly searched for it
+  return [result.title, ...(result.altTitles ?? [])].some((t) => JUNK.test(t));
+}
+
 function bestMatch(query: string, results: MangaSearchResult[]): MangaSearchResult | undefined {
   if (norm(query).length < 2) return undefined;
   let best: MangaSearchResult | undefined;
   let bestScore = 0;
   for (const r of results) {
+    if (isJunk(r, query)) continue; // skip doujinshi / parodies / spin-offs
     const candidates = [r.title, ...(r.altTitles ?? [])];
     const s = candidates.reduce((max, c) => Math.max(max, score(query, c)), 0);
     if (s > bestScore) {
