@@ -25,19 +25,19 @@ export default function SourcesScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const sourcesQ = useSourcesQuery();
-  const { selectedSourceId, language, hiddenSources, setSource, setLanguage } = useSettings();
+  const { selectedSourceId, language, enabledLanguages, hiddenSources, setSource, setLanguage } =
+    useSettings();
 
   const [viewLang, setViewLang] = useState(language);
 
+  // Only the content languages the user enabled in Settings.
   const allLanguages = useMemo(() => {
-    const set = new Set<string>();
-    sourcesQ.data?.forEach((s) => s.languages.forEach((l) => set.add(l)));
-    return [...set].sort((a, b) => {
+    return [...enabledLanguages].sort((a, b) => {
       const ia = LANG_ORDER.indexOf(a);
       const ib = LANG_ORDER.indexOf(b);
       return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib) || a.localeCompare(b);
     });
-  }, [sourcesQ.data]);
+  }, [enabledLanguages]);
 
   const sourcesForLang = useMemo(
     () =>

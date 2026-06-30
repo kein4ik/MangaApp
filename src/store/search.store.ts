@@ -43,6 +43,10 @@ export const POPULAR_SEARCHES = [
   'Omniscient Reader',
   'Vagabond',
   'Demon Slayer',
+  'Attack on Titan',
+  'The Beginning After the End',
+  'The God of High School',
+  'Tower of God',
 ];
 
 /** Genre chips — tapping searches the keyword. */
@@ -57,4 +61,7 @@ export const GENRES = [
   'Adventure',
   'Mystery',
   'Slice of Life',
+  'Issekai',
+  'Thriller',
+  'Sports',
 ];

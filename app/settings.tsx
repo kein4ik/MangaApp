@@ -13,14 +13,16 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { languageLabel } from '@/components/languages';
 import { clearLibrary, clearReadingProgress } from '@/data/local/db';
+import { useSourcesQuery } from '@/data/queries';
 import { sourceMeta } from '@/lib/sourceMeta';
+import { contentLanguages, isSourceUsable } from '@/lib/sourceFilter';
 import { useReaderSettings } from '@/store/reader.store';
 import { useSearchHistory } from '@/store/search.store';
+import { useSettings } from '@/store/settings.store';
 import { colors, radius, spacing } from '@/theme/colors';
 import { typography } from '@/theme/typography';
-
-const SOURCES = ['mangadex', 'mangapill', 'mangalib', 'remanga', 'mangabuff'];
 
 export default function SettingsScreen() {
   const qc = useQueryClient();
@@ -28,6 +30,16 @@ export default function SettingsScreen() {
   const insets = useSafeAreaInsets();
   const reader = useReaderSettings();
   const { recent, clearRecent } = useSearchHistory();
+  const sources = useSourcesQuery();
+  const { enabledLanguages, hiddenSources, toggleLanguage, toggleHidden } = useSettings();
+  const langs = contentLanguages(sources.data ?? []);
+  // Sources whose language is enabled — these are the ones worth toggling on/off.
+  const sourcesForLangs = (sources.data ?? []).filter((s) =>
+    s.languages.some((l) => enabledLanguages.includes(l)),
+  );
+  const enabledCount = sourcesForLangs.filter(
+    (s) => isSourceUsable(s, enabledLanguages, hiddenSources),
+  ).length;
 
   const confirm = (title: string, message: string, onYes: () => void) =>
     Alert.alert(title, message, [
@@ -75,9 +87,48 @@ export default function SettingsScreen() {
           />
         </Section>
 
-        {/* ---------- Sources ---------- */}
+        {/* ---------- Content languages ---------- */}
+        <Section title="Content languages">
+          {langs.map((code) => (
+            <ToggleRow
+              key={code}
+              label={languageLabel(code)}
+              value={enabledLanguages.includes(code)}
+              onChange={() => toggleLanguage(code)}
+            />
+          ))}
+        </Section>
+
+        {/* ---------- Sources (only for enabled languages) ---------- */}
         <Section title="Sources">
-          <ActionRow label="Source diagnostics" onPress={() => router.push('/diagnostics')} />
+          {sourcesForLangs.length === 0 ? (
+            <Text style={styles.sourcesEmpty}>Enable a content language above to see sources.</Text>
+          ) : (
+            sourcesForLangs.map((s) => (
+              <View key={s.id} style={styles.row}>
+                <View style={styles.sourceRowLeft}>
+                  <View style={[styles.dot, { backgroundColor: sourceMeta(s.id).color }]} />
+                  <View>
+                    <Text style={styles.rowLabelInline}>{s.name}</Text>
+                    <Text style={styles.sourceLangs}>
+                      {s.languages.slice(0, 4).map(languageLabel).join(', ')}
+                    </Text>
+                  </View>
+                </View>
+                <Switch
+                  value={!hiddenSources.includes(s.id)}
+                  onValueChange={() => toggleHidden(s.id)}
+                  trackColor={{ true: colors.accent, false: colors.border }}
+                  thumbColor="#fff"
+                />
+              </View>
+            ))
+          )}
+          <ActionRow
+            label="Source diagnostics"
+            value={`${enabledCount} on`}
+            onPress={() => router.push('/diagnostics')}
+          />
         </Section>
 
         {/* ---------- Data ---------- */}
@@ -126,10 +177,10 @@ export default function SettingsScreen() {
           </View>
           <Text style={styles.sourcesLabel}>Sources</Text>
           <View style={styles.sourceChips}>
-            {SOURCES.map((id) => (
-              <View key={id} style={styles.sourceChip}>
-                <View style={[styles.dot, { backgroundColor: sourceMeta(id).color }]} />
-                <Text style={styles.sourceChipText}>{sourceMeta(id).name}</Text>
+            {sources.data?.map((s) => (
+              <View key={s.id} style={styles.sourceChip}>
+                <View style={[styles.dot, { backgroundColor: sourceMeta(s.id).color }]} />
+                <Text style={styles.sourceChipText}>{s.name}</Text>
               </View>
             ))}
           </View>
@@ -256,6 +307,9 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
   },
   rowLabel: { ...typography.caption, color: colors.textMuted, textTransform: 'uppercase' },
+  sourceRowLeft: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  sourceLangs: { ...typography.caption, color: colors.textFaint, marginTop: 1 },
+  sourcesEmpty: { ...typography.caption, color: colors.textMuted, padding: spacing.lg },
   rowLabelInline: { ...typography.body, color: colors.text },
   rowRight: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
   rowValue: { ...typography.body, color: colors.textMuted },

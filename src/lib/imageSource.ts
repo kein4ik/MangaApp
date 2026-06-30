@@ -19,6 +19,11 @@ const REFERER_RULES: { hosts: string[]; referer: string }[] = [
     hosts: ['readdetectiveconan.com'], // Mangapill's image CDN
     referer: 'https://mangapill.com/',
   },
+  {
+    // WEBTOON image CDN (covers + pages) — pstatic.net rejects no-referer with 403.
+    hosts: ['pstatic.net'],
+    referer: 'https://www.webtoons.com/',
+  },
 ];
 
 export function imageSource(url?: string | null): ImageSource | undefined {

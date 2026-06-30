@@ -1,3 +1,4 @@
+import { fetchWithTimeout } from '../http';
 import type { SourceProvider } from '../SourceProvider';
 import type {
   Chapter,
@@ -41,7 +42,7 @@ type MdChapter = {
 };
 
 async function getJSON<T>(url: string): Promise<T> {
-  const res = await fetch(url, { headers: HEADERS });
+  const res = await fetchWithTimeout(url, { headers: HEADERS });
   if (!res.ok) throw new Error(`MangaDex ${res.status}`);
   return (await res.json()) as T;
 }
@@ -106,6 +107,8 @@ export class MangaDexProvider implements SourceProvider {
     p.append('includes[]', 'cover_art');
     p.append('contentRating[]', 'safe');
     p.append('contentRating[]', 'suggestive');
+    // Skip titles with no readable chapters (licensed/empty) — trending already does this.
+    p.append('hasAvailableChapters', 'true');
     if (options?.lang) p.append('availableTranslatedLanguage[]', options.lang);
     const data = await getJSON<{ data: MdManga[] }>(`${API}/manga?${p}`);
     return data.data.map(toResult);

@@ -3,6 +3,7 @@ import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from
 
 import { useSourcesQuery } from '@/data/queries';
 import type { SourceInfo } from '@/data/sources/types';
+import { isSourceUsable } from '@/lib/sourceFilter';
 import { useSettings } from '@/store/settings.store';
 import { colors, radius, spacing } from '@/theme/colors';
 import { typography } from '@/theme/typography';
@@ -17,23 +18,41 @@ import { languageLabel } from './languages';
  * offer the current one — we never silently mix sources/languages.
  */
 export function SourceLangBar() {
-  const { selectedSourceId, language, hiddenSources, setSource, setLanguage } = useSettings();
+  const { selectedSourceId, language, enabledLanguages, hiddenSources, setSource, setLanguage } =
+    useSettings();
   const sources = useSourcesQuery();
   const [sourceOpen, setSourceOpen] = useState(false);
   const [langOpen, setLangOpen] = useState(false);
 
-  // Don't offer sources the user has hidden in diagnostics.
-  const visibleSources = sources.data?.filter((s) => !hiddenSources.includes(s.id));
+  // Only offer sources for enabled content languages that aren't hidden.
+  const visibleSources = sources.data?.filter((s) =>
+    isSourceUsable(s, enabledLanguages, hiddenSources),
+  );
   const current = sources.data?.find((s) => s.id === selectedSourceId);
-  const langs = current?.languages ?? ['en'];
+  // Only offer the user's enabled content languages (we only use en/ru), not
+  // every language a multi-language source like MangaDex technically supports.
+  const enabledLangs = (current?.languages ?? []).filter((l) => enabledLanguages.includes(l));
+  const langs = enabledLangs.length ? enabledLangs : [language];
 
-  // Keep the language valid for the selected source. A RU-only source (MangaLib,
-  // Remanga) can never be "English" — correct any stale combo automatically.
+  // Keep the selected source + language valid for the enabled content languages.
+  // If the selected source's language gets disabled (e.g. you turn off English
+  // while WEBTOON is selected), move to a usable source instead of leaving a
+  // stale one selected. Then keep the language valid + enabled for that source.
   useEffect(() => {
-    if (current && !current.languages.includes(language)) {
-      setLanguage(current.languages[0] ?? 'en');
+    if (!sources.data) return;
+    const usable = sources.data.filter((s) => isSourceUsable(s, enabledLanguages, hiddenSources));
+    if (usable.length === 0) return;
+    const pickLang = (s: SourceInfo) =>
+      s.languages.find((l) => enabledLanguages.includes(l)) ?? s.languages[0] ?? 'en';
+
+    const cur = usable.find((s) => s.id === selectedSourceId);
+    if (!cur) {
+      setSource(usable[0].id);
+      setLanguage(pickLang(usable[0]));
+    } else if (!cur.languages.includes(language) || !enabledLanguages.includes(language)) {
+      setLanguage(pickLang(cur));
     }
-  }, [current, language, setLanguage]);
+  }, [sources.data, selectedSourceId, language, enabledLanguages, hiddenSources, setSource, setLanguage]);
 
   const onPickSource = (s: SourceInfo) => {
     setSource(s.id);
@@ -78,7 +97,10 @@ export function SourceLangBar() {
                   <Text style={styles.rowTitle}>{s.name}</Text>
                   <Text style={styles.rowMeta}>
                     {s.supportsReading ? 'Reading + info' : 'Info only'} ·{' '}
-                    {s.languages.length} langs
+                    {s.languages
+                      .filter((l) => enabledLanguages.includes(l))
+                      .map((l) => l.toUpperCase())
+                      .join(' · ') || '—'}
                   </Text>
                 </View>
                 <HealthBadge status={s.status} />

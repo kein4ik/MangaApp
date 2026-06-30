@@ -1,3 +1,4 @@
+import { fetchWithTimeout } from '../http';
 import type { SourceProvider } from '../SourceProvider';
 import type {
   Chapter,
@@ -39,7 +40,7 @@ type RmChapter = { id: number; chapter?: string; tome?: number; name?: string; i
 type RmPage = { link: string; height?: number; width?: number };
 
 async function getJSON<T>(url: string): Promise<T> {
-  const res = await fetch(url, { headers: HEADERS });
+  const res = await fetchWithTimeout(url, { headers: HEADERS });
   if (!res.ok) throw new Error(`Remanga ${res.status}`);
   return (await res.json()) as T;
 }

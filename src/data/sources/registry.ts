@@ -1,8 +1,11 @@
+import { AsuraProvider } from './providers/asura';
 import { MangabuffProvider } from './providers/mangabuff';
 import { MangaDexProvider } from './providers/mangadex';
+import { MangaKatanaProvider } from './providers/mangakatana';
 import { MangaLibProvider } from './providers/mangalib';
 import { MangapillProvider } from './providers/mangapill';
 import { RemangaProvider } from './providers/remanga';
+import { WebtoonProvider } from './providers/webtoon';
 import type { SourceProvider } from './SourceProvider';
 import type { SourceInfo } from './types';
 
@@ -13,6 +16,9 @@ import type { SourceInfo } from './types';
 const providers: SourceProvider[] = [
   new MangaDexProvider(),
   new MangapillProvider(),
+  new WebtoonProvider(),
+  new AsuraProvider(),
+  new MangaKatanaProvider(),
   new MangaLibProvider(),
   new RemangaProvider(),
   new MangabuffProvider(),

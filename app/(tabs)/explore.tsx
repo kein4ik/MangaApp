@@ -15,7 +15,10 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { MangaCard } from '@/components/MangaCard';
 import { SourceLangBar } from '@/components/SourceLangBar';
-import { useSearch } from '@/data/queries';
+import { useDeadChapters, useSearch, useUnifiedSearch } from '@/data/queries';
+import type { WorkCluster } from '@/data/sources/match';
+import { isWorkDead } from '@/lib/sourceFilter';
+import { sourceMeta } from '@/lib/sourceMeta';
 import { GENRES, POPULAR_SEARCHES, useSearchHistory } from '@/store/search.store';
 import { useSettings } from '@/store/settings.store';
 import { colors, radius, spacing } from '@/theme/colors';
@@ -24,16 +27,18 @@ import { typography } from '@/theme/typography';
 const COLS = 3;
 const GAP = spacing.md;
 type Status = 'all' | 'ongoing' | 'completed';
+type Scope = 'all' | 'source';
 
 export default function ExploreScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { selectedSourceId, language } = useSettings();
+  const { selectedSourceId, language, enabledLanguages, hiddenSources } = useSettings();
   const { recent, addRecent, removeRecent, clearRecent } = useSearchHistory();
 
   const [input, setInput] = useState('');
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState<Status>('all');
+  const [scope, setScope] = useState<Scope>('all');
 
   // Debounce typing so we don't fire a request on every keystroke.
   useEffect(() => {
@@ -41,7 +46,12 @@ export default function ExploreScreen() {
     return () => clearTimeout(t);
   }, [input]);
 
-  const { data, isLoading, isError } = useSearch(selectedSourceId, query, language);
+  // Only the active scope actually fires a request.
+  const single = useSearch(selectedSourceId, scope === 'source' ? query : '', language);
+  const unified = useUnifiedSearch(scope === 'all' ? query : '', enabledLanguages, hiddenSources);
+  const active = scope === 'all' ? unified : single;
+  const isLoading = active.isLoading;
+  const isError = active.isError;
 
   // Tapping a recent / popular / genre chip runs that search immediately.
   const runSearch = (q: string) => {
@@ -50,10 +60,41 @@ export default function ExploreScreen() {
     addRecent(q);
   };
 
-  const results = useMemo(() => {
-    if (!data) return data;
-    return status === 'all' ? data : data.filter((m) => m.status === status);
-  }, [data, status]);
+  const dead = useDeadChapters();
+
+  // Normalize both modes to clusters so one list renders them. A single-source
+  // result is just a cluster of one. Sources confirmed empty (no readable
+  // chapters) are pruned; a work with no readable source left is dropped.
+  const results = useMemo<WorkCluster[] | undefined>(() => {
+    let clusters: WorkCluster[] | undefined =
+      scope === 'all'
+        ? unified.data
+        : single.data?.map((m) => ({
+            key: `${m.sourceId}:${m.externalId}`,
+            primary: m,
+            variants: [m],
+          }));
+    if (!clusters) return clusters;
+
+    const deadKeys = new Set(dead.data ?? []);
+    clusters = clusters
+      .map((c) => {
+        const alive = c.variants.filter(
+          (v) =>
+            !isWorkDead(
+              deadKeys,
+              v.sourceId,
+              v.externalId,
+              v.languages.filter((l) => enabledLanguages.includes(l)),
+            ),
+        );
+        if (alive.length === 0) return null;
+        return { ...c, primary: alive.includes(c.primary) ? c.primary : alive[0], variants: alive };
+      })
+      .filter((c): c is WorkCluster => c !== null);
+
+    return status === 'all' ? clusters : clusters.filter((c) => c.primary.status === status);
+  }, [scope, unified.data, single.data, status, dead.data, enabledLanguages]);
 
   const cardWidth =
     (Dimensions.get('window').width - spacing.lg * 2 - GAP * (COLS - 1)) / COLS;
@@ -67,7 +108,7 @@ export default function ExploreScreen() {
           value={input}
           onChangeText={setInput}
           onSubmitEditing={() => input.trim() && addRecent(input.trim())}
-          placeholder={`Search ${selectedSourceId}…`}
+          placeholder={scope === 'all' ? 'Search all sources…' : `Search ${selectedSourceId}…`}
           placeholderTextColor={colors.textFaint}
           style={styles.input}
           autoCorrect={false}
@@ -78,6 +119,20 @@ export default function ExploreScreen() {
             <Text style={styles.clearX}>✕</Text>
           </Pressable>
         )}
+      </View>
+
+      <View style={styles.scopeRow}>
+        {(['all', 'source'] as Scope[]).map((s) => (
+          <Pressable
+            key={s}
+            style={[styles.scopeChip, scope === s && styles.scopeChipActive]}
+            onPress={() => setScope(s)}
+          >
+            <Text style={[styles.scopeText, scope === s && styles.scopeTextActive]}>
+              {s === 'all' ? 'All sources' : selectedSourceId}
+            </Text>
+          </Pressable>
+        ))}
       </View>
 
       {query.length === 0 ? (
@@ -152,7 +207,7 @@ export default function ExploreScreen() {
       ) : (
         <FlatList
           data={results}
-          keyExtractor={(item) => item.externalId}
+          keyExtractor={(item) => item.key}
           numColumns={COLS}
           columnWrapperStyle={{ gap: GAP }}
           contentContainerStyle={{
@@ -176,20 +231,29 @@ export default function ExploreScreen() {
               ))}
             </View>
           }
-          renderItem={({ item }) => (
-            <MangaCard
-              width={cardWidth}
-              title={item.title}
-              coverUrl={item.coverUrl}
-              onPress={() => {
-                addRecent(query);
-                router.push({
-                  pathname: '/manga/[id]',
-                  params: { id: item.externalId, sourceId: item.sourceId },
-                });
-              }}
-            />
-          )}
+          renderItem={({ item }) => {
+            const multi = item.variants.length > 1;
+            return (
+              <MangaCard
+                width={cardWidth}
+                title={item.primary.title}
+                coverUrl={item.primary.coverUrl}
+                sourceLabel={
+                  multi
+                    ? `${item.variants.length} sources`
+                    : sourceMeta(item.primary.sourceId).name
+                }
+                sourceColor={multi ? colors.accent : sourceMeta(item.primary.sourceId).color}
+                onPress={() => {
+                  addRecent(query);
+                  router.push({
+                    pathname: '/manga/[id]',
+                    params: { id: item.primary.externalId, sourceId: item.primary.sourceId },
+                  });
+                }}
+              />
+            );
+          }}
         />
       )}
     </View>
@@ -267,4 +331,22 @@ const styles = StyleSheet.create({
   statusTextActive: { color: colors.accent },
 
   resultFilters: { flexDirection: 'row', gap: spacing.sm, paddingBottom: spacing.md },
+
+  scopeRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginHorizontal: spacing.lg,
+    marginBottom: spacing.md,
+  },
+  scopeChip: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+    borderRadius: radius.pill,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  scopeChipActive: { backgroundColor: colors.accentMuted, borderColor: colors.accent },
+  scopeText: { ...typography.caption, color: colors.textMuted, fontWeight: '600', textTransform: 'capitalize' },
+  scopeTextActive: { color: colors.accent },
 });

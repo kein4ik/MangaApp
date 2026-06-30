@@ -34,11 +34,13 @@ export default function RootLayout() {
             maxAge: DAY,
             dehydrateOptions: {
               // Persist stable data for instant app restarts, but NOT page image
-              // URLs (signed/expiring) or cross-source match results.
+              // URLs (signed/expiring), cross-source match results, or the
+              // source list (local + cheap; persisting it hides newly added sources).
               shouldDehydrateQuery: (q) =>
                 q.state.status === 'success' &&
                 q.queryKey[0] !== 'pages' &&
-                q.queryKey[0] !== 'match',
+                q.queryKey[0] !== 'match' &&
+                q.queryKey[0] !== 'sources',
             },
           }}
         >

@@ -1,3 +1,4 @@
+import { fetchWithTimeout } from '../http';
 import type { SourceProvider } from '../SourceProvider';
 import type {
   Chapter,
@@ -43,7 +44,7 @@ type MlChapter = {
 type MlPage = { url: string; height?: number; width?: number };
 
 async function getJSON<T>(url: string): Promise<T> {
-  const res = await fetch(url, { headers: HEADERS });
+  const res = await fetchWithTimeout(url, { headers: HEADERS });
   if (!res.ok) throw new Error(`MangaLib ${res.status}`);
   return (await res.json()) as T;
 }

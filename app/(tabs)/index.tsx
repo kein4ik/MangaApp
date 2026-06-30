@@ -1,3 +1,4 @@
+import { Image } from 'expo-image';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useMemo, useState } from 'react';
 import {
@@ -69,13 +70,13 @@ export default function HomeScreen() {
 
   return (
     <View style={styles.screen}>
-    <Pressable
-      style={[styles.gear, { top: insets.top + spacing.sm }]}
-      onPress={() => router.push('/settings')}
-      hitSlop={10}
-    >
-      <Text style={styles.gearIcon}>⚙</Text>
-    </Pressable>
+    {/* Slim header over the hero: app icon on the left, settings on the right. */}
+    <View style={[styles.topBar, { top: insets.top + spacing.sm }]} pointerEvents="box-none">
+      <Image source={require('../../assets/logo_app.png')} style={styles.logo} contentFit="contain" />
+      <Pressable style={styles.gear} onPress={() => router.push('/settings')} hitSlop={10}>
+        <Text style={styles.gearIcon}>⚙</Text>
+      </Pressable>
+    </View>
     <ScrollView
       style={styles.screen}
       contentContainerStyle={{ paddingBottom: spacing.xxl }}
@@ -210,10 +211,18 @@ export default function HomeScreen() {
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg },
-  gear: {
+  topBar: {
     position: 'absolute',
-    right: spacing.lg,
+    left: 0,
+    right: 0,
     zIndex: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.lg,
+  },
+  logo: { width: 40, height: 40, borderRadius: 10 },
+  gear: {
     width: 38,
     height: 38,
     borderRadius: radius.pill,

@@ -5,7 +5,7 @@
     "version": "1.0.0",
     "scheme": "mangaapp",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/logo_app.png",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
     "ios": {
@@ -14,10 +14,8 @@
     "android": {
       "package": "com.maskedman.mangaapp",
       "adaptiveIcon": {
-        "backgroundColor": "#0E0B1A",
-        "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
-        "monochromeImage": "./assets/android-icon-monochrome.png"
+        "foregroundImage": "./assets/logo_app.png",
+        "backgroundColor": "#F7C8DC"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false

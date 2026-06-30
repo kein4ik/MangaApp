@@ -1,3 +1,4 @@
+import { fetchWithTimeout } from '../http';
 import type { SourceProvider } from '../SourceProvider';
 import type {
   Chapter,
@@ -14,12 +15,27 @@ const UA =
 const HEADERS = { 'User-Agent': UA, 'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8', Referer: `${BASE}/` };
 
 async function getHTML(path: string): Promise<string> {
-  const res = await fetch(`${BASE}${path}`, { headers: { ...HEADERS, Accept: 'text/html' } });
+  const res = await fetchWithTimeout(`${BASE}${path}`, { headers: { ...HEADERS, Accept: 'text/html' } });
   if (!res.ok) throw new Error(`Mangabuff ${res.status}`);
   return res.text();
 }
 
 const coverFor = (slug: string) => `${BASE}/img/manga/posters/${slug}.jpg`;
+
+/** Absolutize a parsed cover path and prefer the full-res poster over the x180 thumb. */
+function absCover(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  const abs = url.startsWith('http') ? url : `${BASE}${url.startsWith('/') ? '' : '/'}${url}`;
+  return abs.replace('/x180/img/', '/img/');
+}
+
+/**
+ * Trading-card entries ("Карточки по …", slug `karti-*`) get listed alongside
+ * manga on /manga/top but 404 as manga pages — drop them so they don't surface
+ * as broken covers or dead links.
+ */
+const isNonManga = (slug: string, title: string) =>
+  slug.startsWith('karti-') || /^карточки\b/i.test(title);
 
 function parseCards(html: string, limit: number): MangaSearchResult[] {
   const out: MangaSearchResult[] = [];
@@ -27,8 +43,13 @@ function parseCards(html: string, limit: number): MangaSearchResult[] {
     /<a[^>]+href="https:\/\/mangabuff\.ru\/manga\/([a-z0-9-]+)"[^>]+class="cards__item"[^>]*>([\s\S]*?)<\/a>/g,
   )) {
     const slug = m[1];
-    const title = m[2].match(/cards__name[^>]*>([^<]+)/)?.[1]?.trim() || slug;
-    out.push({ sourceId: 'mangabuff', externalId: slug, title, coverUrl: coverFor(slug), languages: ['ru'] });
+    const block = m[2];
+    const title = block.match(/cards__name[^>]*>([^<]+)/)?.[1]?.trim() || slug;
+    if (isNonManga(slug, title)) continue;
+    // Read the real poster from the card; fall back to the slug-based guess.
+    const coverUrl =
+      absCover(block.match(/background-image:\s*url\(['"]?([^'")]+)/)?.[1]) ?? coverFor(slug);
+    out.push({ sourceId: 'mangabuff', externalId: slug, title, coverUrl, languages: ['ru'] });
   }
   return out.slice(0, limit);
 }
@@ -49,18 +70,21 @@ export class MangabuffProvider implements SourceProvider {
   }
 
   async search(query: string, options?: SearchOptions): Promise<MangaSearchResult[]> {
-    const res = await fetch(`${BASE}/search/suggestions?q=${encodeURIComponent(query)}`, {
+    const res = await fetchWithTimeout(`${BASE}/search/suggestions?q=${encodeURIComponent(query)}`, {
       headers: { ...HEADERS, Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
     });
     if (!res.ok) throw new Error(`Mangabuff search ${res.status}`);
     const hits = (await res.json()) as SearchHit[];
-    return hits.slice(0, options?.limit ?? 30).map((h) => ({
-      sourceId: 'mangabuff',
-      externalId: h.slug,
-      title: h.name,
-      coverUrl: coverFor(h.slug),
-      languages: ['ru'],
-    }));
+    return hits
+      .filter((h) => !isNonManga(h.slug, h.name))
+      .slice(0, options?.limit ?? 30)
+      .map((h) => ({
+        sourceId: 'mangabuff',
+        externalId: h.slug,
+        title: h.name,
+        coverUrl: coverFor(h.slug),
+        languages: ['ru'],
+      }));
   }
 
   async getMangaDetails(externalId: string): Promise<MangaDetails> {
@@ -72,11 +96,17 @@ export class MangabuffProvider implements SourceProvider {
       const t = m[1].trim();
       if (t) genres.push(t);
     }
+    // Prefer the real poster declared on the page over the slug-based guess.
+    const coverUrl =
+      absCover(
+        html.match(/property="og:image"\s+content="([^"]+)"/)?.[1] ??
+          html.match(/class="manga__img"[\s\S]{0,160}?<img[^>]+src="([^"]+)"/)?.[1],
+      ) ?? coverFor(externalId);
     return {
       sourceId: 'mangabuff',
       externalId,
       title: title || externalId,
-      coverUrl: coverFor(externalId),
+      coverUrl,
       description: description?.trim(),
       genres: genres.length ? [...new Set(genres)].slice(0, 12) : undefined,
       languages: ['ru'],

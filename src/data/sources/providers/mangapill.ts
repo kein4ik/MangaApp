@@ -1,3 +1,4 @@
+import { fetchWithTimeout } from '../http';
 import type { SourceProvider } from '../SourceProvider';
 import type {
   Chapter,
@@ -13,7 +14,7 @@ const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36';
 
 async function getHTML(path: string): Promise<string> {
-  const res = await fetch(`${BASE}${path}`, { headers: { 'User-Agent': UA, Accept: 'text/html' } });
+  const res = await fetchWithTimeout(`${BASE}${path}`, { headers: { 'User-Agent': UA, Accept: 'text/html' } });
   if (!res.ok) throw new Error(`Mangapill ${res.status}`);
   return res.text();
 }

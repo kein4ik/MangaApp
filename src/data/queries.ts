@@ -1,20 +1,28 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
 import {
-  addToLibrary,
+  addToLibraryForGroup,
   cacheManga,
   getContinueReading,
   getLibrary,
   getLibraryStatus,
+  getDeadChapterKeys,
   getMangaProgress,
-  removeFromLibrary,
-  setFavorite,
-  setLibraryStatus,
+  getReadChapterIds,
+  getReadChapterNumbers,
+  getWorkPref,
+  markChaptersChecked,
+  markChaptersRead,
+  normChapterNumber,
+  removeFromLibraryForGroup,
+  setFavoriteForGroup,
+  setLibraryStatusForGroup,
   type LibraryStatus,
 } from './local/db';
-import { findMatches } from './sources/match';
-import { SourceManager, sourcesInfo } from './sources/registry';
-import type { MangaSearchResult } from './sources/types';
+import { clusterSearchResults, findMatches, type WorkCluster } from './sources/match';
+import { SourceManager, SourceRegistry, sourcesInfo } from './sources/registry';
+import type { MangaDetails, MangaSearchResult } from './sources/types';
+import { isSourceUsable } from '@/lib/sourceFilter';
 
 const STALE = 5 * 60 * 1000;
 
@@ -24,7 +32,9 @@ export function useSourcesQuery() {
   return useQuery({
     queryKey: ['sources'],
     queryFn: async () => sourcesInfo(),
-    staleTime: Infinity,
+    // Local + instant: recompute on mount so the list always reflects the
+    // current provider registry (a persisted Infinity cache hid new sources).
+    staleTime: 0,
   });
 }
 
@@ -50,11 +60,53 @@ export function useSearch(sourceId: string, query: string, lang?: string) {
   });
 }
 
-export function useMatches(title: string | undefined, excludeSourceId: string) {
+/**
+ * Search every enabled, searchable source in parallel and collapse duplicates
+ * into one card per work (cross-source search). A source that errors or is
+ * hidden is simply skipped — the rest still return.
+ */
+export function useUnifiedSearch(
+  query: string,
+  enabledLanguages: string[],
+  hiddenSources: string[],
+  limit = 20,
+) {
+  const langKey = [...enabledLanguages].sort().join(',');
+  const hiddenKey = [...hiddenSources].sort().join(',');
   return useQuery({
-    queryKey: ['match', title, excludeSourceId],
-    queryFn: () => findMatches(title!, excludeSourceId),
-    enabled: !!title && title.length > 1,
+    queryKey: ['unified-search', query, langKey, hiddenKey],
+    enabled: query.trim().length > 0,
+    staleTime: STALE,
+    queryFn: async (): Promise<WorkCluster[]> => {
+      const providers = SourceRegistry.all().filter(
+        (p) => p.supportsSearch && isSourceUsable(p, enabledLanguages, hiddenSources),
+      );
+      const perSource = await Promise.all(
+        providers.map(async (p) => {
+          try {
+            return await p.search(query, { limit });
+          } catch {
+            return [];
+          }
+        }),
+      );
+      return clusterSearchResults(perSource.flat());
+    },
+  });
+}
+
+export function useMatches(
+  manga: MangaDetails | undefined,
+  excludeSourceId: string,
+  enabledLanguages: string[],
+  hiddenSources: string[],
+) {
+  const langKey = [...enabledLanguages].sort().join(',');
+  const hiddenKey = [...hiddenSources].sort().join(',');
+  return useQuery({
+    queryKey: ['match', excludeSourceId, manga?.externalId, langKey, hiddenKey],
+    queryFn: () => findMatches(manga!, excludeSourceId, enabledLanguages, hiddenSources),
+    enabled: !!manga && manga.title.length > 1,
     staleTime: STALE,
   });
 }
@@ -86,6 +138,47 @@ export function useCrossSourceProgress(matches: MangaSearchResult[] | undefined)
   });
 }
 
+/**
+ * When the active source has no readable chapters (often a licensed title), find
+ * the first OTHER source for this work that does — so the UI can offer a working
+ * source in one tap instead of leaving a dead end. Only runs when `enabled`
+ * (i.e. the current source really is empty), and stops at the first hit.
+ */
+export function useReadableFallback(
+  variants: { sourceId: string; externalId: string }[],
+  activeSourceId: string,
+  activeId: string,
+  enabled: boolean,
+) {
+  const others = variants.filter(
+    (v) => !(v.sourceId === activeSourceId && v.externalId === activeId),
+  );
+  const key = others.map((v) => `${v.sourceId}:${v.externalId}`).join(',');
+  return useQuery({
+    queryKey: ['readable-fallback', activeSourceId, activeId, key],
+    enabled: enabled && others.length > 0,
+    staleTime: STALE,
+    queryFn: async () => {
+      for (const v of others) {
+        try {
+          const provider = SourceManager.require(v.sourceId);
+          if (!provider.supportsReading) continue;
+          const lang = provider.languages[0] ?? 'en';
+          const chapters = await provider.getChapters(v.externalId, lang);
+          // Teach the dead-chapters cache from these probes too (success path only).
+          markChaptersChecked(v.sourceId, v.externalId, lang, chapters.length > 0).catch(() => {});
+          if (chapters.length > 0) {
+            return { sourceId: v.sourceId, externalId: v.externalId, count: chapters.length, lang };
+          }
+        } catch {
+          // A down source shouldn't block finding a readable one.
+        }
+      }
+      return null;
+    },
+  });
+}
+
 export function useMangaDetails(sourceId: string, externalId: string) {
   return useQuery({
     queryKey: ['manga', sourceId, externalId],
@@ -107,8 +200,23 @@ export function useMangaDetails(sourceId: string, externalId: string) {
 export function useChapters(sourceId: string, externalId: string, lang: string) {
   return useQuery({
     queryKey: ['chapters', sourceId, externalId, lang],
-    queryFn: () => SourceManager.require(sourceId).getChapters(externalId, lang),
+    queryFn: async () => {
+      const chapters = await SourceManager.require(sourceId).getChapters(externalId, lang);
+      // Only reached on success, so an empty result here is genuinely empty
+      // (not a timeout) — safe to remember as a dead source+title+language.
+      markChaptersChecked(sourceId, externalId, lang, chapters.length > 0).catch(() => {});
+      return chapters;
+    },
     staleTime: STALE,
+  });
+}
+
+/** Set of `source:external:lang` keys known to have zero readable chapters. */
+export function useDeadChapters() {
+  return useQuery({
+    queryKey: ['dead-chapters'],
+    queryFn: () => getDeadChapterKeys(),
+    staleTime: 0,
   });
 }
 
@@ -173,8 +281,19 @@ export function useUpdates() {
               staleTime: STALE,
             });
             if (!chapters.length) return null;
-            const lastRead = Number(m.chapter_number);
-            const unread = chapters.filter((c) => Number(c.chapterNumber) > lastRead);
+            // A chapter counts as read if explicitly marked/finished, or if it's
+            // at/below the latest position you've reached. Combining both makes
+            // the count accurate for mark-as-read AND out-of-order reading,
+            // without flagging a just-started title's whole backlog as unread.
+            const readNums = new Set(await getReadChapterNumbers(m.source_id, m.external_id));
+            const currentNum = Number(m.chapter_number);
+            const isRead = (c: { externalId: string; chapterNumber?: string }) => {
+              const norm = normChapterNumber(c.chapterNumber);
+              if (norm && readNums.has(norm)) return true;
+              const n = Number(c.chapterNumber);
+              return !isNaN(n) && !isNaN(currentNum) && n <= currentNum;
+            };
+            const unread = chapters.filter((c) => !isRead(c));
             if (unread.length === 0) return null;
             const next = unread[0];
             return {
@@ -198,6 +317,48 @@ export function useUpdates() {
         .sort((a, b) => b.unread - a.unread || (b.lastReadAt ?? 0) - (a.lastReadAt ?? 0));
     },
     staleTime: STALE,
+  });
+}
+
+/** Set of chapter ids the user has finished/marked read for a title. */
+export function useReadChapters(sourceId: string, externalId: string) {
+  return useQuery({
+    queryKey: ['read-chapters', sourceId, externalId],
+    queryFn: () => getReadChapterIds(sourceId, externalId),
+    staleTime: 0,
+  });
+}
+
+/** A work's preferred source+language (what to open by default). */
+export function useWorkPref(sourceId: string, externalId: string) {
+  return useQuery({
+    queryKey: ['work-pref', sourceId, externalId],
+    queryFn: () => getWorkPref(sourceId, externalId),
+    staleTime: 0,
+  });
+}
+
+/** Read chapter numbers across the whole group (cross-source read state). */
+export function useReadChapterNumbers(sourceId: string, externalId: string) {
+  return useQuery({
+    queryKey: ['read-numbers', sourceId, externalId],
+    queryFn: () => getReadChapterNumbers(sourceId, externalId),
+    staleTime: 0,
+  });
+}
+
+/** Mark one or many chapters read/unread (the Mark-as-read controls). */
+export function useMarkChaptersRead(sourceId: string, externalId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { items: { chapterId: string; chapterNumber?: string }[]; read: boolean }) =>
+      markChaptersRead(sourceId, externalId, v.items, v.read),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['read-chapters', sourceId, externalId] });
+      qc.invalidateQueries({ queryKey: ['read-numbers'] });
+      // Read state changes how many chapters count as "unread" in Updates.
+      qc.invalidateQueries({ queryKey: ['updates'] });
+    },
   });
 }
 
@@ -228,10 +389,11 @@ export function useSetLibraryStatus(sourceId: string, externalId: string, manga:
         cover_url: manga.coverUrl ?? null,
         description: manga.description ?? null,
       });
-      await setLibraryStatus(sourceId, externalId, status);
+      await setLibraryStatusForGroup(sourceId, externalId, status);
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['library-status', sourceId, externalId] });
+      // Group writes touch sibling sources, so refresh status broadly.
+      qc.invalidateQueries({ queryKey: ['library-status'] });
       qc.invalidateQueries({ queryKey: ['library'] });
     },
   });
@@ -248,10 +410,10 @@ export function useToggleFavorite(manga: MangaSearchResult) {
         cover_url: manga.coverUrl ?? null,
         description: manga.description ?? null,
       });
-      await setFavorite(manga.sourceId, manga.externalId, favorite);
+      await setFavoriteForGroup(manga.sourceId, manga.externalId, favorite);
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['library-status', manga.sourceId, manga.externalId] });
+      qc.invalidateQueries({ queryKey: ['library-status'] });
       qc.invalidateQueries({ queryKey: ['library'] });
     },
   });
@@ -262,7 +424,7 @@ export function useToggleLibrary(manga: MangaSearchResult) {
   return useMutation({
     mutationFn: async (inLibrary: boolean) => {
       if (inLibrary) {
-        await removeFromLibrary(manga.sourceId, manga.externalId);
+        await removeFromLibraryForGroup(manga.sourceId, manga.externalId);
       } else {
         await cacheManga({
           source_id: manga.sourceId,
@@ -271,11 +433,11 @@ export function useToggleLibrary(manga: MangaSearchResult) {
           cover_url: manga.coverUrl ?? null,
           description: manga.description ?? null,
         });
-        await addToLibrary(manga.sourceId, manga.externalId);
+        await addToLibraryForGroup(manga.sourceId, manga.externalId);
       }
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['library-status', manga.sourceId, manga.externalId] });
+      qc.invalidateQueries({ queryKey: ['library-status'] });
       qc.invalidateQueries({ queryKey: ['library'] });
     },
   });
