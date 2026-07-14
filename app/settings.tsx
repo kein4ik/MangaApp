@@ -16,6 +16,11 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { languageLabel } from '@/components/languages';
 import { clearLibrary, clearReadingProgress } from '@/data/local/db';
 import { useSourcesQuery } from '@/data/queries';
+import { registerChapterCheck, unregisterChapterCheck } from '@/lib/backgroundUpdates';
+import { checkForNewChapters } from '@/lib/chapterCheck';
+import { ensureNotificationPermission, setupAndroidChannel } from '@/lib/notifications';
+import { setNotifyEnabledFlag } from '@/lib/notifyPrefs';
+import { isExpoGo } from '@/lib/runtime';
 import { sourceMeta } from '@/lib/sourceMeta';
 import { contentLanguages, isSourceUsable } from '@/lib/sourceFilter';
 import { useReaderSettings } from '@/store/reader.store';
@@ -31,7 +36,14 @@ export default function SettingsScreen() {
   const reader = useReaderSettings();
   const { recent, clearRecent } = useSearchHistory();
   const sources = useSourcesQuery();
-  const { enabledLanguages, hiddenSources, toggleLanguage, toggleHidden } = useSettings();
+  const {
+    enabledLanguages,
+    hiddenSources,
+    toggleLanguage,
+    toggleHidden,
+    notifyChapters,
+    setNotifyChapters,
+  } = useSettings();
   const langs = contentLanguages(sources.data ?? []);
   // Sources whose language is enabled — these are the ones worth toggling on/off.
   const sourcesForLangs = (sources.data ?? []).filter((s) =>
@@ -46,6 +58,64 @@ export default function SettingsScreen() {
       { text: 'Cancel', style: 'cancel' },
       { text: 'Clear', style: 'destructive', onPress: onYes },
     ]);
+
+  const onToggleNotify = async (on: boolean) => {
+    if (on && isExpoGo) {
+      Alert.alert(
+        'Needs a real build',
+        'Notifications don’t work in Expo Go. Install a dev/EAS build of the app to use chapter notifications.',
+      );
+      return;
+    }
+    if (!on) {
+      setNotifyChapters(false);
+      await setNotifyEnabledFlag(false);
+      await unregisterChapterCheck();
+      return;
+    }
+    const granted = await ensureNotificationPermission();
+    if (!granted) {
+      Alert.alert(
+        'Notifications are off',
+        'Allow notifications for MangaApp in your system settings, then try again.',
+      );
+      return;
+    }
+    await setupAndroidChannel();
+    setNotifyChapters(true);
+    await setNotifyEnabledFlag(true);
+    await registerChapterCheck();
+    // Record a silent baseline (fire-and-forget: walking the whole library can
+    // take a while, and the toggle shouldn't hang on it).
+    checkForNewChapters(false).catch(() => {});
+    Alert.alert(
+      'Notifications on',
+      "We'll let you know when titles in your library get new chapters. New chapters are checked about once an hour.",
+    );
+  };
+
+  const onCheckNow = async () => {
+    if (isExpoGo) {
+      Alert.alert(
+        'Needs a real build',
+        'Chapter checking uses notifications, which don’t run in Expo Go. Try it on a dev/EAS build.',
+      );
+      return;
+    }
+    const granted = await ensureNotificationPermission();
+    if (!granted) {
+      Alert.alert('Notifications are off', 'Turn on notifications first.');
+      return;
+    }
+    await setupAndroidChannel();
+    const hits = await checkForNewChapters(true);
+    Alert.alert(
+      'Checked for updates',
+      hits.length
+        ? `${hits.length} title${hits.length > 1 ? 's have' : ' has'} a new chapter.`
+        : 'No new chapters right now.',
+    );
+  };
 
   return (
     <>
@@ -85,6 +155,16 @@ export default function SettingsScreen() {
             value={reader.keepAwake}
             onChange={reader.setKeepAwake}
           />
+        </Section>
+
+        {/* ---------- Notifications ---------- */}
+        <Section title="Notifications">
+          <ToggleRow
+            label="New chapter notifications"
+            value={notifyChapters}
+            onChange={onToggleNotify}
+          />
+          <ActionRow label="Check for updates now" onPress={onCheckNow} />
         </Section>
 
         {/* ---------- Content languages ---------- */}

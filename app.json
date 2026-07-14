@@ -35,6 +35,13 @@
             "usesCleartextTraffic": true
           }
         }
+      ],
+      "expo-background-task",
+      [
+        "expo-notifications",
+        {
+          "color": "#F7C8DC"
+        }
       ]
     ],
     "experiments": {

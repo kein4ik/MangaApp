@@ -9,10 +9,13 @@ type SettingsState = {
   enabledLanguages: string[];
   /** Sources the user has temporarily hidden (e.g. broken ones). */
   hiddenSources: string[];
+  /** Notify when library titles get new chapters (background check). */
+  notifyChapters: boolean;
   setSource: (id: string) => void;
   setLanguage: (lang: string) => void;
   toggleLanguage: (code: string) => void;
   toggleHidden: (id: string) => void;
+  setNotifyChapters: (on: boolean) => void;
 };
 
 export const useSettings = create<SettingsState>()(
@@ -22,6 +25,7 @@ export const useSettings = create<SettingsState>()(
       language: 'en',
       enabledLanguages: ['en', 'ru'],
       hiddenSources: [],
+      notifyChapters: false,
       setSource: (selectedSourceId) => set({ selectedSourceId }),
       setLanguage: (language) => set({ language }),
       toggleLanguage: (code) =>
@@ -36,6 +40,7 @@ export const useSettings = create<SettingsState>()(
             ? s.hiddenSources.filter((x) => x !== id)
             : [...s.hiddenSources, id],
         })),
+      setNotifyChapters: (notifyChapters) => set({ notifyChapters }),
     }),
     {
       name: 'mangaapp-settings',
