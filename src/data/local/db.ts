@@ -78,6 +78,18 @@ async function init(): Promise<SQLite.SQLiteDatabase> {
       checked_at INTEGER NOT NULL,
       PRIMARY KEY (source_id, external_id, language)
     );
+
+    -- Highest chapter we've already told the user about, per library title, so
+    -- the background checker only fires a notification for genuinely new chapters
+    -- (the first sighting of a title records a baseline and stays silent).
+    CREATE TABLE IF NOT EXISTS notify_watermark (
+      source_id TEXT NOT NULL,
+      external_id TEXT NOT NULL,
+      latest_number TEXT,
+      notified_id TEXT,
+      checked_at INTEGER NOT NULL,
+      PRIMARY KEY (source_id, external_id)
+    );
   `);
 
   // Migration: add the language column to older databases that predate it.
@@ -90,6 +102,11 @@ async function init(): Promise<SQLite.SQLiteDatabase> {
   // `read` marks a chapter finished (auto on ~full scroll, or manual mark).
   if (!cols.some((c) => c.name === 'read')) {
     await db.execAsync(`ALTER TABLE reading_progress ADD COLUMN read INTEGER NOT NULL DEFAULT 0`);
+  }
+  // `genres` (JSON array) on cached titles powers the Home "For you" rails.
+  const mangaCols = await db.getAllAsync<{ name: string }>(`PRAGMA table_info(cached_manga)`);
+  if (!mangaCols.some((c) => c.name === 'genres')) {
+    await db.execAsync(`ALTER TABLE cached_manga ADD COLUMN genres TEXT`);
   }
 
   return db;
@@ -107,19 +124,29 @@ export type CachedManga = {
   title: string;
   cover_url: string | null;
   description: string | null;
+  /** Genre names as the source reports them (JSON array in the DB). */
+  genres?: string[] | null;
 };
 
 export async function cacheManga(m: CachedManga): Promise<void> {
   const db = await getDb();
+  // COALESCE keeps previously-stored genres when a caller (e.g. the library
+  // mutations, which only know the search-result shape) passes none — only
+  // getMangaDetails actually knows genres, and a favorite toggle must not wipe them.
   await db.runAsync(
     `INSERT OR REPLACE INTO cached_manga
-      (source_id, external_id, title, cover_url, description, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+      (source_id, external_id, title, cover_url, description, genres, updated_at)
+     VALUES (?, ?, ?, ?, ?,
+             COALESCE(?, (SELECT genres FROM cached_manga WHERE source_id = ? AND external_id = ?)),
+             ?)`,
     m.source_id,
     m.external_id,
     m.title,
     m.cover_url,
     m.description,
+    m.genres && m.genres.length ? JSON.stringify(m.genres) : null,
+    m.source_id,
+    m.external_id,
     Date.now(),
   );
 }
@@ -209,6 +236,45 @@ export async function getReadChapterIds(
     mangaExternalId,
   );
   return rows.map((r) => r.chapter_id);
+}
+
+// ---- notify_watermark (background new-chapter notifications) ----
+export type NotifyWatermark = {
+  source_id: string;
+  external_id: string;
+  latest_number: string | null;
+  notified_id: string | null;
+};
+
+/** Every title's last-notified watermark, for the background chapter checker. */
+export async function getNotifyWatermarks(): Promise<NotifyWatermark[]> {
+  const db = await getDb();
+  return db.getAllAsync<NotifyWatermark>(
+    `SELECT source_id, external_id, latest_number, notified_id FROM notify_watermark`,
+  );
+}
+
+/** Record the newest chapter we've seen/notified for a title. */
+export async function setNotifyWatermark(
+  sourceId: string,
+  externalId: string,
+  latestNumber: string | null,
+  notifiedId: string | null,
+): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(
+    `INSERT INTO notify_watermark (source_id, external_id, latest_number, notified_id, checked_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(source_id, external_id)
+     DO UPDATE SET latest_number = excluded.latest_number,
+                   notified_id = excluded.notified_id,
+                   checked_at = excluded.checked_at`,
+    sourceId,
+    externalId,
+    latestNumber,
+    notifiedId,
+    Date.now(),
+  );
 }
 
 /** Canonical chapter number so "41", "41.0" and " 41 " all compare equal. */
@@ -621,6 +687,8 @@ export type LibraryRow = {
   external_id: string;
   title: string;
   cover_url: string | null;
+  /** JSON array of genre names (from cached_manga), null for older cache rows. */
+  genres: string | null;
   favorite: number;
   status: string;
   last_read_at: number | null;
@@ -639,7 +707,7 @@ export async function getLibrary(): Promise<LibraryRow[]> {
   const db = await getDb();
   const rows = await db.getAllAsync<LibraryRow>(
     `SELECT l.source_id, l.manga_external_id AS external_id, l.favorite, l.status, l.last_read_at,
-            m.title, m.cover_url,
+            m.title, m.cover_url, m.genres,
             p.chapter_id, p.chapter_number, p.language, p.percent
      FROM library_items l
      JOIN cached_manga m

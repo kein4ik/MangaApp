@@ -102,6 +102,27 @@ async function imageServer(): Promise<string> {
   }
 }
 
+// Genre name (lowercased) → genre id, fetched once, for browseByGenre. MangaLib
+// genre names are Russian and so are the genre strings in its manga details, so
+// feeding a title's own genre back in matches cleanly.
+let genreMapCache: { map: Map<string, string>; at: number } | null = null;
+async function genreMap(): Promise<Map<string, string>> {
+  if (genreMapCache && Date.now() - genreMapCache.at < 24 * 60 * 60 * 1000) return genreMapCache.map;
+  const map = new Map<string, string>();
+  try {
+    const data = await getJSON<{ data: { genres: { id: number; name: string }[] } }>(
+      `${API}/constants?fields[]=genres`,
+    );
+    for (const g of data.data.genres) {
+      if (g.name) map.set(g.name.toLowerCase(), String(g.id));
+    }
+    genreMapCache = { map, at: Date.now() };
+  } catch {
+    // Empty map → browseByGenre returns nothing.
+  }
+  return map;
+}
+
 export class MangaLibProvider implements SourceProvider {
   id = 'mangalib';
   name = 'MangaLib';
@@ -122,6 +143,18 @@ export class MangaLibProvider implements SourceProvider {
     const p = new URLSearchParams();
     p.set('q', query);
     p.append('site_id[]', SITE_ID);
+    const data = await getJSON<{ data: MlManga[] }>(`${API}/manga?${p}`);
+    return data.data.slice(0, options?.limit ?? 30).map(toResult);
+  }
+
+  async browseByGenre(genre: string, options?: SearchOptions): Promise<MangaSearchResult[]> {
+    const genres = await genreMap();
+    const id = genres.get(genre.trim().toLowerCase());
+    if (!id) return [];
+    const p = new URLSearchParams();
+    p.append('site_id[]', SITE_ID);
+    p.append('genres[]', id);
+    p.set('sort_by', options?.sort === 'latest' ? 'last_chapter_at' : 'views');
     const data = await getJSON<{ data: MlManga[] }>(`${API}/manga?${p}`);
     return data.data.slice(0, options?.limit ?? 30).map(toResult);
   }

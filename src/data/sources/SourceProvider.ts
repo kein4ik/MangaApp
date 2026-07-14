@@ -24,4 +24,13 @@ export interface SourceProvider {
   getMangaDetails(externalId: string): Promise<MangaDetails>;
   getChapters(externalId: string, lang?: string): Promise<Chapter[]>;
   getChapterPages(chapterId: string): Promise<ChapterPage[]>;
+
+  /**
+   * Optional: real genre/tag browse (not a title search). The `genre` string is
+   * matched against the source's own tag names — so it's meant to be fed a genre
+   * that came from THIS source's details, where the naming already matches
+   * (MangaDex = English tags, MangaLib = Russian). Powers "More like this" and
+   * the genre Browse screen. Sources without a genre index simply omit it.
+   */
+  browseByGenre?(genre: string, options?: SearchOptions): Promise<MangaSearchResult[]>;
 }

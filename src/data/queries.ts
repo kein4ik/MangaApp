@@ -22,6 +22,7 @@ import {
 import { clusterSearchResults, findMatches, type WorkCluster } from './sources/match';
 import { SourceManager, SourceRegistry, sourcesInfo } from './sources/registry';
 import type { MangaDetails, MangaSearchResult } from './sources/types';
+import { genreForTagLanguage, tagLanguageOf } from '@/lib/genreMap';
 import { isSourceUsable } from '@/lib/sourceFilter';
 
 const STALE = 5 * 60 * 1000;
@@ -57,6 +58,164 @@ export function useSearch(sourceId: string, query: string, lang?: string) {
     queryFn: () => SourceManager.require(sourceId).search(query, { lang }),
     enabled: query.trim().length > 0,
     staleTime: STALE,
+  });
+}
+
+/** Whether a source can do real genre browse (drives "More like this" + tags). */
+export function sourceSupportsGenres(sourceId: string): boolean {
+  return typeof SourceManager.require(sourceId).browseByGenre === 'function';
+}
+
+/**
+ * Genre browse across every enabled genre-capable source: the genre name is
+ * translated into each provider's tag language (EN↔RU) before querying; a
+ * provider with no translation is skipped rather than fed a name it would
+ * ignore. Duplicates collapse into one card per work.
+ */
+async function browseGenreAcrossSources(
+  genre: string,
+  enabledLanguages: string[],
+  hiddenSources: string[],
+  limitPerSource = 24,
+): Promise<WorkCluster[]> {
+  const providers = SourceRegistry.all().filter(
+    (p) => p.browseByGenre && isSourceUsable(p, enabledLanguages, hiddenSources),
+  );
+  const perSource = await Promise.all(
+    providers.map(async (p) => {
+      const name = genreForTagLanguage(genre, tagLanguageOf(p.id));
+      if (!name) return [];
+      // Result language: the first enabled language this source serves.
+      const lang = p.languages.find((l) => enabledLanguages.includes(l));
+      try {
+        return await p.browseByGenre!(name, { lang, limit: limitPerSource });
+      } catch {
+        return [];
+      }
+    }),
+  );
+  return clusterSearchResults(perSource.flat());
+}
+
+/** The Browse screen's query (respects content languages + hidden sources). */
+export function useBrowseGenreAll(
+  genre: string,
+  enabledLanguages: string[],
+  hiddenSources: string[],
+) {
+  const langKey = [...enabledLanguages].sort().join(',');
+  const hiddenKey = [...hiddenSources].sort().join(',');
+  return useQuery({
+    queryKey: ['browse-genre', genre, langKey, hiddenKey],
+    enabled: genre.trim().length > 0,
+    staleTime: STALE,
+    queryFn: () => browseGenreAcrossSources(genre, enabledLanguages, hiddenSources),
+  });
+}
+
+export type ForYouRail = { genre: string; items: WorkCluster[] };
+
+/**
+ * Home "For you" rails: find the user's most-read genres from the library
+ * (genre names are stored with each cached title and normalized EN↔RU so
+ * "Боевик" and "Action" count as one), then pull a cross-source genre feed for
+ * the top two. Titles already in the library are filtered out — recommendations
+ * should be new. Empty while the library has no genre data yet.
+ */
+export function useForYou(enabledLanguages: string[], hiddenSources: string[]) {
+  const langKey = [...enabledLanguages].sort().join(',');
+  const hiddenKey = [...hiddenSources].sort().join(',');
+  return useQuery({
+    queryKey: ['for-you', langKey, hiddenKey],
+    staleTime: STALE,
+    queryFn: async (): Promise<ForYouRail[]> => {
+      const lib = await getLibrary();
+      if (lib.length === 0) return [];
+
+      // Count genres across the library, normalized to a canonical key.
+      const counts = new Map<string, { display: string; count: number }>();
+      for (const row of lib) {
+        if (!row.genres) continue;
+        let names: string[] = [];
+        try {
+          names = JSON.parse(row.genres) as string[];
+        } catch {
+          continue;
+        }
+        for (const raw of names) {
+          const en = genreForTagLanguage(raw, 'en');
+          const key = (en ?? raw).toLowerCase();
+          const existing = counts.get(key);
+          if (existing) existing.count += 1;
+          else counts.set(key, { display: en ?? raw, count: 1 });
+        }
+      }
+      const top = [...counts.values()].sort((a, b) => b.count - a.count).slice(0, 2);
+      if (top.length === 0) return [];
+
+      const libTitles = new Set(lib.map((r) => r.title.trim().toLowerCase()));
+      const seenWorks = new Set<string>();
+      const rails: ForYouRail[] = [];
+      for (const g of top) {
+        const clusters = await browseGenreAcrossSources(
+          g.display,
+          enabledLanguages,
+          hiddenSources,
+          20,
+        );
+        const items = clusters
+          .filter((c) => {
+            // Skip what the user already has, and what an earlier rail shows.
+            if (c.variants.some((v) => libTitles.has(v.title.trim().toLowerCase()))) return false;
+            if (seenWorks.has(c.key)) return false;
+            seenWorks.add(c.key);
+            return true;
+          })
+          .slice(0, 12);
+        if (items.length > 0) rails.push({ genre: g.display, items });
+      }
+      return rails;
+    },
+  });
+}
+
+/**
+ * "More like this": titles sharing a genre with the current one, from the SAME
+ * source (so genre names match). Walks the manga's own genres until it has
+ * enough unique results; empty when the source has no genre index.
+ */
+export function useSimilar(
+  sourceId: string,
+  genres: string[] | undefined,
+  excludeId: string,
+  lang?: string,
+) {
+  const list = (genres ?? []).slice(0, 3);
+  return useQuery({
+    queryKey: ['similar', sourceId, excludeId, list.join('|'), lang],
+    enabled: list.length > 0,
+    staleTime: STALE,
+    queryFn: async (): Promise<MangaSearchResult[]> => {
+      const provider = SourceManager.require(sourceId);
+      if (!provider.browseByGenre) return [];
+      const seen = new Set<string>([excludeId]);
+      const out: MangaSearchResult[] = [];
+      for (const g of list) {
+        if (out.length >= 12) break;
+        try {
+          const res = await provider.browseByGenre(g, { lang, limit: 20 });
+          for (const m of res) {
+            if (seen.has(m.externalId)) continue;
+            seen.add(m.externalId);
+            out.push(m);
+            if (out.length >= 12) break;
+          }
+        } catch {
+          // Skip a genre that fails; the others still contribute.
+        }
+      }
+      return out;
+    },
   });
 }
 
@@ -190,6 +349,7 @@ export function useMangaDetails(sourceId: string, externalId: string) {
         title: details.title,
         cover_url: details.coverUrl ?? null,
         description: details.description ?? null,
+        genres: details.genres ?? null,
       });
       return details;
     },
@@ -395,6 +555,7 @@ export function useSetLibraryStatus(sourceId: string, externalId: string, manga:
       // Group writes touch sibling sources, so refresh status broadly.
       qc.invalidateQueries({ queryKey: ['library-status'] });
       qc.invalidateQueries({ queryKey: ['library'] });
+      qc.invalidateQueries({ queryKey: ['for-you'] });
     },
   });
 }
@@ -415,6 +576,7 @@ export function useToggleFavorite(manga: MangaSearchResult) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['library-status'] });
       qc.invalidateQueries({ queryKey: ['library'] });
+      qc.invalidateQueries({ queryKey: ['for-you'] });
     },
   });
 }
@@ -439,6 +601,7 @@ export function useToggleLibrary(manga: MangaSearchResult) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['library-status'] });
       qc.invalidateQueries({ queryKey: ['library'] });
+      qc.invalidateQueries({ queryKey: ['for-you'] });
     },
   });
 }

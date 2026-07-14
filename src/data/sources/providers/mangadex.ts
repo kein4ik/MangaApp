@@ -76,6 +76,27 @@ function toResult(manga: MdManga): MangaSearchResult {
   };
 }
 
+// Tag name (lowercased) → tag id, fetched once. Lets browseByGenre turn a genre
+// string from a manga's details into a real includedTags filter.
+let tagMapCache: { map: Map<string, string>; at: number } | null = null;
+async function tagMap(): Promise<Map<string, string>> {
+  if (tagMapCache && Date.now() - tagMapCache.at < 24 * 60 * 60 * 1000) return tagMapCache.map;
+  const map = new Map<string, string>();
+  try {
+    const data = await getJSON<{
+      data: { id: string; attributes: { name: Record<string, string> } }[];
+    }>(`${API}/manga/tag`);
+    for (const t of data.data) {
+      const name = t.attributes.name?.en;
+      if (name) map.set(name.toLowerCase(), t.id);
+    }
+    tagMapCache = { map, at: Date.now() };
+  } catch {
+    // Leave the map empty on failure — browseByGenre just returns nothing.
+  }
+  return map;
+}
+
 export class MangaDexProvider implements SourceProvider {
   id = 'mangadex';
   name = 'MangaDex';
@@ -108,6 +129,23 @@ export class MangaDexProvider implements SourceProvider {
     p.append('contentRating[]', 'safe');
     p.append('contentRating[]', 'suggestive');
     // Skip titles with no readable chapters (licensed/empty) — trending already does this.
+    p.append('hasAvailableChapters', 'true');
+    if (options?.lang) p.append('availableTranslatedLanguage[]', options.lang);
+    const data = await getJSON<{ data: MdManga[] }>(`${API}/manga?${p}`);
+    return data.data.map(toResult);
+  }
+
+  async browseByGenre(genre: string, options?: SearchOptions): Promise<MangaSearchResult[]> {
+    const tags = await tagMap();
+    const id = tags.get(genre.trim().toLowerCase());
+    if (!id) return [];
+    const p = new URLSearchParams();
+    p.append('includedTags[]', id);
+    p.append(options?.sort === 'latest' ? 'order[latestUploadedChapter]' : 'order[followedCount]', 'desc');
+    p.set('limit', String(options?.limit ?? 24));
+    p.append('includes[]', 'cover_art');
+    p.append('contentRating[]', 'safe');
+    p.append('contentRating[]', 'suggestive');
     p.append('hasAvailableChapters', 'true');
     if (options?.lang) p.append('availableTranslatedLanguage[]', options.lang);
     const data = await getJSON<{ data: MdManga[] }>(`${API}/manga?${p}`);

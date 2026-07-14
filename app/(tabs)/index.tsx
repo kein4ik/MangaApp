@@ -17,7 +17,7 @@ import { HeroCarousel } from '@/components/HeroCarousel';
 import { FilterToggle, type HistoryFilter } from '@/components/FilterToggle';
 import { MangaCard } from '@/components/MangaCard';
 import { SourceLangBar } from '@/components/SourceLangBar';
-import { useContinueReading, useTrending } from '@/data/queries';
+import { useContinueReading, useForYou, useTrending } from '@/data/queries';
 import type { MangaSearchResult } from '@/data/sources/types';
 import { sourceMeta } from '@/lib/sourceMeta';
 import { useSettings } from '@/store/settings.store';
@@ -29,11 +29,12 @@ const CARD_W = 124;
 export default function HomeScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { selectedSourceId, language } = useSettings();
+  const { selectedSourceId, language, enabledLanguages, hiddenSources } = useSettings();
 
   const top = useTrending(selectedSourceId, language, 'popular');
   const latest = useTrending(selectedSourceId, language, 'latest');
   const continueReading = useContinueReading();
+  const forYou = useForYou(enabledLanguages, hiddenSources);
 
   // Refresh "Continue reading" whenever Home regains focus (e.g. after reading
   // a chapter) so newly-read titles show up immediately, not after a refresh.
@@ -87,6 +88,7 @@ export default function HomeScreen() {
             top.refetch();
             latest.refetch();
             continueReading.refetch();
+            forYou.refetch();
           }}
           tintColor={colors.accent}
         />
@@ -156,6 +158,38 @@ export default function HomeScreen() {
           )}
         </View>
       )}
+
+      {/* Personal genre rails — appear once the library knows some genres. */}
+      {forYou.data?.map((rail) => (
+        <View key={rail.genre} style={styles.section}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>
+              Because you read <Text style={styles.genreAccent}>{rail.genre}</Text>
+            </Text>
+            <Pressable
+              onPress={() => router.push({ pathname: '/browse', params: { genre: rail.genre } })}
+              hitSlop={8}
+            >
+              <Text style={styles.seeAll}>see all</Text>
+            </Pressable>
+          </View>
+          <FlatList
+            horizontal
+            data={rail.items}
+            keyExtractor={(item) => item.key}
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.rail}
+            renderItem={({ item }) => (
+              <MangaCard
+                width={CARD_W}
+                title={item.primary.title}
+                coverUrl={item.primary.coverUrl}
+                onPress={() => openManga(item.primary)}
+              />
+            )}
+          />
+        </View>
+      ))}
 
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
@@ -252,6 +286,7 @@ const styles = StyleSheet.create({
     marginBottom: spacing.md,
   },
   seeAll: { ...typography.caption, color: colors.accent },
+  genreAccent: { color: colors.accent },
   emptyHistory: {
     ...typography.body,
     color: colors.textFaint,

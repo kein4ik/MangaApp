@@ -75,6 +75,38 @@ function toResult(t: RmTitle): MangaSearchResult {
   };
 }
 
+// Genre name (lowercased) → id, from the forms reference endpoint, cached 24h.
+// Remanga's naming differs from MangaLib's for a couple of genres, so common
+// aliases are registered too (Боевик→Экшен, Школа→Школьники) — the browse layer
+// hands us MangaLib-style canonical names.
+const GENRE_ALIASES: [alias: string, canonical: string][] = [
+  ['боевик', 'экшен'],
+  ['школа', 'школьники'],
+];
+let genreMapCache: { map: Map<string, number>; at: number } | null = null;
+async function genreMap(): Promise<Map<string, number>> {
+  if (genreMapCache && Date.now() - genreMapCache.at < 24 * 60 * 60 * 1000) {
+    return genreMapCache.map;
+  }
+  const map = new Map<string, number>();
+  try {
+    const data = await getJSON<{ content: { genres: { id: number; name: string }[] } }>(
+      `${API}/forms/titles/?get=genres`,
+    );
+    for (const g of data.content.genres) {
+      if (g.name) map.set(g.name.toLowerCase(), g.id);
+    }
+    for (const [alias, canonical] of GENRE_ALIASES) {
+      const id = map.get(canonical);
+      if (id != null && !map.has(alias)) map.set(alias, id);
+    }
+    genreMapCache = { map, at: Date.now() };
+  } catch {
+    // Empty map → browseByGenre returns nothing.
+  }
+  return map;
+}
+
 export class RemangaProvider implements SourceProvider {
   id = 'remanga';
   name = 'Remanga';
@@ -96,6 +128,20 @@ export class RemangaProvider implements SourceProvider {
     const count = options?.limit ?? 30;
     const data = await getJSON<{ content: RmTitle[] }>(
       `${API}/search/?query=${encodeURIComponent(query)}&count=${count}&page=1`,
+    );
+    return data.content.map(toResult);
+  }
+
+  /** Real genre filter over the catalog (same endpoint trending uses). */
+  async browseByGenre(genre: string, options?: SearchOptions): Promise<MangaSearchResult[]> {
+    const genres = await genreMap();
+    const id = genres.get(genre.trim().toLowerCase());
+    if (id == null) return [];
+    // Remanga 400s on count > ~30 — same cap as trending.
+    const count = Math.min(options?.limit ?? 30, 30);
+    const ordering = options?.sort === 'latest' ? '-chapter_date' : '-rating';
+    const data = await getJSON<{ content: RmTitle[] }>(
+      `${API}/search/catalog/?genres=${id}&ordering=${ordering}&count=${count}&page=1`,
     );
     return data.content.map(toResult);
   }

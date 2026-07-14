@@ -191,7 +191,11 @@ export default function ExploreScreen() {
             <Text style={styles.subLabel}>Genres</Text>
             <View style={styles.chipWrap}>
               {GENRES.map((g) => (
-                <Pressable key={g} style={styles.genreChip} onPress={() => runSearch(g)}>
+                <Pressable
+                  key={g}
+                  style={styles.genreChip}
+                  onPress={() => router.push({ pathname: '/browse', params: { genre: g } })}
+                >
                   <Text style={styles.genreText}>{g}</Text>
                 </Pressable>
               ))}

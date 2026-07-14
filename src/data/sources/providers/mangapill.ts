@@ -59,6 +59,12 @@ export class MangapillProvider implements SourceProvider {
     return parseList(html).slice(0, options?.limit ?? 30);
   }
 
+  /** Real genre filter — the site's own genre links are `/search?genre=Name`. */
+  async browseByGenre(genre: string, options?: SearchOptions): Promise<MangaSearchResult[]> {
+    const html = await getHTML(`/search?genre=${encodeURIComponent(genre.trim())}&page=1`);
+    return parseList(html).slice(0, options?.limit ?? 30);
+  }
+
   async getMangaDetails(externalId: string): Promise<MangaDetails> {
     const html = await getHTML(`/manga/${externalId}/_`);
     const title = html.match(/<h1[^>]*>([^<]+)<\/h1>/)?.[1]?.trim();

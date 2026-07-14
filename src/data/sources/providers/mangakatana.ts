@@ -86,6 +86,16 @@ export class MangaKatanaProvider implements SourceProvider {
     return parseCards(html, options?.limit ?? 30);
   }
 
+  /** Genre pages are `/genre/{slug}` — slug is the lowercased, dashed name
+   *  (matches the hrefs on title pages, e.g. "Slice of Life" → slice-of-life).
+   *  An unknown slug 404s, which surfaces as a per-source error upstream. */
+  async browseByGenre(genre: string, options?: SearchOptions): Promise<MangaSearchResult[]> {
+    const slug = genre.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    if (!slug) return [];
+    const html = await getHTML(`/genre/${slug}`);
+    return parseCards(html, options?.limit ?? 30);
+  }
+
   async getMangaDetails(externalId: string): Promise<MangaDetails> {
     const html = await getHTML(`/manga/${externalId}`);
     const title =

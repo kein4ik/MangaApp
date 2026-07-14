@@ -33,6 +33,8 @@ import {
   useReadChapters,
   useReadChapterNumbers,
   useSetLibraryStatus,
+  useSimilar,
+  sourceSupportsGenres,
   useWorkPref,
   useSourcesQuery,
   useToggleFavorite,
@@ -43,6 +45,7 @@ import type { Chapter } from '@/data/sources/types';
 import { isWorkDead } from '@/lib/sourceFilter';
 import { languageLabel } from '@/components/languages';
 import { BottomSheet } from '@/components/BottomSheet';
+import { MangaCard } from '@/components/MangaCard';
 import { sourceMeta } from '@/lib/sourceMeta';
 import { useSettings } from '@/store/settings.store';
 import { colors, radius, spacing } from '@/theme/colors';
@@ -98,6 +101,8 @@ export default function MangaDetailsScreen() {
   const setStatus = useSetLibraryStatus(sourceId, id, mangaRef);
   const matches = useMatches(details.data, sourceId, enabledLanguages, hiddenSources);
   const crossProgress = useCrossSourceProgress(matches.data);
+  const genresBrowsable = sourceSupportsGenres(sourceId);
+  const similar = useSimilar(sourceId, genresBrowsable ? details.data?.genres : undefined, id, lang);
   const [statusOpen, setStatusOpen] = useState(false);
 
   // The full set of sources this work is available on (route entry + every
@@ -395,9 +400,25 @@ export default function MangaDetailsScreen() {
               <Text style={styles.title}>{m.title}</Text>
               {headerSubtitle ? <Text style={styles.subtitle}>{headerSubtitle}</Text> : null}
               {m.genres && m.genres.length > 0 && (
-                <Text numberOfLines={1} style={styles.genres}>
-                  {m.genres.slice(0, 3).join('  •  ')}
-                </Text>
+                genresBrowsable ? (
+                  <View style={styles.genreRow}>
+                    {m.genres.slice(0, 3).map((g) => (
+                      <Pressable
+                        key={g}
+                        style={styles.genrePill}
+                        onPress={() =>
+                          router.push({ pathname: '/browse', params: { genre: g } })
+                        }
+                      >
+                        <Text style={styles.genrePillText}>{g}</Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                ) : (
+                  <Text numberOfLines={1} style={styles.genres}>
+                    {m.genres.slice(0, 3).join('  •  ')}
+                  </Text>
+                )
               )}
               <View style={styles.metaChips}>
                 <View style={styles.metaChip}>
@@ -722,6 +743,33 @@ export default function MangaDetailsScreen() {
             </Pressable>
           );
         }}
+        ListFooterComponent={
+          similar.data && similar.data.length > 0 ? (
+            <View style={styles.similarSection}>
+              <Text style={styles.similarHeading}>More like this</Text>
+              <FlatList
+                horizontal
+                data={similar.data}
+                keyExtractor={(s) => `${s.sourceId}:${s.externalId}`}
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={{ paddingHorizontal: spacing.lg, gap: spacing.md }}
+                renderItem={({ item: s }) => (
+                  <MangaCard
+                    width={112}
+                    title={s.title}
+                    coverUrl={s.coverUrl}
+                    onPress={() =>
+                      router.push({
+                        pathname: '/manga/[id]',
+                        params: { id: s.externalId, sourceId: s.sourceId },
+                      })
+                    }
+                  />
+                )}
+              />
+            </View>
+          ) : null
+        }
       />
 
       <BottomSheet visible={statusOpen} title="Status" onClose={() => setStatusOpen(false)}>
@@ -824,6 +872,28 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: spacing.xs,
     maxWidth: '90%',
+  },
+  genreRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: spacing.xs,
+    marginTop: spacing.xs,
+  },
+  genrePill: {
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3,
+    borderRadius: radius.pill,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  genrePillText: { ...typography.tiny, color: colors.purple, fontWeight: '600' },
+  similarSection: { marginTop: spacing.xl, gap: spacing.md },
+  similarHeading: {
+    ...typography.h3,
+    color: colors.text,
+    paddingHorizontal: spacing.lg,
   },
   metaChips: {
     flexDirection: 'row',

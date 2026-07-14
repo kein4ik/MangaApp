@@ -61,7 +61,7 @@ export const GENRES = [
   'Adventure',
   'Mystery',
   'Slice of Life',
-  'Issekai',
+  'Isekai',
   'Thriller',
   'Sports',
 ];

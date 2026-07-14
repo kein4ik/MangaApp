@@ -56,6 +56,38 @@ function parseCards(html: string, limit: number): MangaSearchResult[] {
 
 type SearchHit = { name: string; slug: string };
 
+// Genre name (lowercased) → slug, from the /genres index page, cached 24h.
+// Mangabuff calls Action "Экшен" and School Life "Школьная жизнь" — the aliases
+// let the canonical MangaLib-style names from the browse layer resolve too.
+const GENRE_ALIASES: [alias: string, canonical: string][] = [
+  ['боевик', 'экшен'],
+  ['школа', 'школьная жизнь'],
+];
+let genreMapCache: { map: Map<string, string>; at: number } | null = null;
+async function genreMap(): Promise<Map<string, string>> {
+  if (genreMapCache && Date.now() - genreMapCache.at < 24 * 60 * 60 * 1000) {
+    return genreMapCache.map;
+  }
+  const map = new Map<string, string>();
+  try {
+    const html = await getHTML('/genres');
+    for (const m of html.matchAll(
+      /href="(?:https:\/\/mangabuff\.ru)?\/genres\/([a-z0-9-]+)"[^>]*>([\s\S]*?)<\/a>/g,
+    )) {
+      const name = m[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      if (name && !map.has(name.toLowerCase())) map.set(name.toLowerCase(), m[1]);
+    }
+    for (const [alias, canonical] of GENRE_ALIASES) {
+      const slug = map.get(canonical);
+      if (slug && !map.has(alias)) map.set(alias, slug);
+    }
+    genreMapCache = { map, at: Date.now() };
+  } catch {
+    // Empty map → browseByGenre returns nothing.
+  }
+  return map;
+}
+
 export class MangabuffProvider implements SourceProvider {
   id = 'mangabuff';
   name = 'Mangabuff';
@@ -85,6 +117,14 @@ export class MangabuffProvider implements SourceProvider {
         coverUrl: coverFor(h.slug),
         languages: ['ru'],
       }));
+  }
+
+  /** Genre pages (`/genres/{slug}`) render the same cards as the catalog. */
+  async browseByGenre(genre: string, options?: SearchOptions): Promise<MangaSearchResult[]> {
+    const genres = await genreMap();
+    const slug = genres.get(genre.trim().toLowerCase());
+    if (!slug) return [];
+    return parseCards(await getHTML(`/genres/${slug}`), options?.limit ?? 30);
   }
 
   async getMangaDetails(externalId: string): Promise<MangaDetails> {
