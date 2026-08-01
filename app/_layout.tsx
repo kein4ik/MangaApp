@@ -2,7 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createAsyncStoragePersister } from '@tanstack/query-async-storage-persister';
 import { QueryClient } from '@tanstack/react-query';
 import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client';
-import { Stack, useRouter } from 'expo-router';
+import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useRef } from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -18,6 +18,7 @@ import {
 } from '@/lib/notifications';
 import { isNotifyEnabled } from '@/lib/notifyPrefs';
 import { isExpoGo } from '@/lib/runtime';
+import { useGuardedRouter } from '@/lib/useGuardedRouter';
 import { colors } from '@/theme/colors';
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -28,7 +29,7 @@ const DAY = 24 * 60 * 60 * 1000;
  * crash) instead of the hook, which would need a static import.
  */
 function NotificationTapHandler() {
-  const router = useRouter();
+  const router = useGuardedRouter();
   useEffect(() => {
     let active = true;
     const open = (t: TapTarget) => {

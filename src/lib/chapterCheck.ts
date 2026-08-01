@@ -3,6 +3,7 @@ import { SourceManager } from '@/data/sources/registry';
 import type { Chapter } from '@/data/sources/types';
 
 import { presentChapterNotification, type ChapterNotice } from './notifications';
+import { mapLimit } from './pool';
 
 /** Newest chapter of a title = the one with the highest number (fallback: last). */
 function pickLatest(chapters: Chapter[]): Chapter | undefined {
@@ -30,8 +31,9 @@ export async function checkForNewChapters(notify: boolean): Promise<ChapterNotic
   const markBy = new Map(marks.map((m) => [`${m.source_id}:${m.external_id}`, m]));
   const hits: ChapterNotice[] = [];
 
-  await Promise.all(
-    lib.map(async (m) => {
+  // A few at a time, not the whole library at once — bursts trip source rate
+  // limits (which would silently skip those titles' notifications).
+  await mapLimit(lib, 3, async (m) => {
       const lang = m.language || 'en';
       try {
         const chapters = await SourceManager.require(m.source_id).getChapters(m.external_id, lang);
@@ -68,8 +70,7 @@ export async function checkForNewChapters(notify: boolean): Promise<ChapterNotic
       } catch {
         // A source being down shouldn't fail the whole run — retry next time.
       }
-    }),
-  );
+  });
 
   if (notify) {
     for (const h of hits.slice(0, 8)) await presentChapterNotification(h);

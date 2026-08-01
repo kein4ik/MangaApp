@@ -1,4 +1,5 @@
 import { Image } from 'expo-image';
+import { memo } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { imageSource } from '@/lib/imageSource';
@@ -18,7 +19,12 @@ type Props = {
   onPress: () => void;
 };
 
-export function MangaCard({
+/**
+ * Memoized: rails and grids re-render whenever their screen's state changes
+ * (a filter chip, a loaded query), and without this every visible cover
+ * re-rendered with it. Comparing props is far cheaper than rebuilding cards.
+ */
+export const MangaCard = memo(function MangaCard({
   title,
   coverUrl,
   subtitle,
@@ -70,7 +76,7 @@ export function MangaCard({
       ) : null}
     </Pressable>
   );
-}
+});
 
 const styles = StyleSheet.create({
   cover: {

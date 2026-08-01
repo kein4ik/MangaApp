@@ -1,6 +1,6 @@
 import { Image } from 'expo-image';
-import { useFocusEffect, useRouter } from 'expo-router';
-import { useCallback, useMemo, useState } from 'react';
+import { useFocusEffect } from 'expo-router';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -18,6 +18,7 @@ import { FilterToggle, type HistoryFilter } from '@/components/FilterToggle';
 import { MangaCard } from '@/components/MangaCard';
 import { SourceLangBar } from '@/components/SourceLangBar';
 import { useContinueReading, useForYou, useTrending } from '@/data/queries';
+import { useGuardedRouter } from '@/lib/useGuardedRouter';
 import type { MangaSearchResult } from '@/data/sources/types';
 import { sourceMeta } from '@/lib/sourceMeta';
 import { useSettings } from '@/store/settings.store';
@@ -27,14 +28,23 @@ import { typography } from '@/theme/typography';
 const CARD_W = 124;
 
 export default function HomeScreen() {
-  const router = useRouter();
+  const router = useGuardedRouter();
   const insets = useSafeAreaInsets();
   const { selectedSourceId, language, enabledLanguages, hiddenSources } = useSettings();
 
   const top = useTrending(selectedSourceId, language, 'popular');
   const latest = useTrending(selectedSourceId, language, 'latest');
   const continueReading = useContinueReading();
-  const forYou = useForYou(enabledLanguages, hiddenSources);
+
+  // "For you" is heavy (multi-source fetch + HTML parsing) — hold it until the
+  // screen has rendered and settled so it never competes with first taps.
+  // (Plain timer: InteractionManager is deprecated in this RN version.)
+  const [discoveryReady, setDiscoveryReady] = useState(false);
+  useEffect(() => {
+    const timer = setTimeout(() => setDiscoveryReady(true), 1500);
+    return () => clearTimeout(timer);
+  }, []);
+  const forYou = useForYou(enabledLanguages, hiddenSources, discoveryReady);
 
   // Refresh "Continue reading" whenever Home regains focus (e.g. after reading
   // a chapter) so newly-read titles show up immediately, not after a refresh.

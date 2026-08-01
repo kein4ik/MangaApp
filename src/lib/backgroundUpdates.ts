@@ -2,7 +2,7 @@ import * as BackgroundTask from 'expo-background-task';
 import * as TaskManager from 'expo-task-manager';
 
 import { checkForNewChapters } from './chapterCheck';
-import { isNotifyEnabled } from './notifyPrefs';
+import { isNotifyEnabled, setLastBackgroundRun } from './notifyPrefs';
 import { isExpoGo } from './runtime';
 
 /**
@@ -20,6 +20,7 @@ if (!isExpoGo) {
     try {
       if (!(await isNotifyEnabled())) return BackgroundTask.BackgroundTaskResult.Success;
       await checkForNewChapters(true);
+      await setLastBackgroundRun();
       return BackgroundTask.BackgroundTaskResult.Success;
     } catch {
       return BackgroundTask.BackgroundTaskResult.Failed;
@@ -31,7 +32,10 @@ export async function registerChapterCheck(): Promise<void> {
   if (isExpoGo) return;
   try {
     if (await TaskManager.isTaskRegisteredAsync(CHAPTER_CHECK_TASK)) return;
-    await BackgroundTask.registerTaskAsync(CHAPTER_CHECK_TASK, { minimumInterval: 60 });
+    // 15 min = the Android floor. It's a HINT, not a schedule: the OS batches
+    // background work and may run it far less often (Doze, battery saver).
+    // Asking for the minimum simply gives it the most opportunities.
+    await BackgroundTask.registerTaskAsync(CHAPTER_CHECK_TASK, { minimumInterval: 15 });
   } catch {
     // Unsupported platform (e.g. web) — silently no-op.
   }

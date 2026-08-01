@@ -1,4 +1,4 @@
-import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
+import { Stack, useLocalSearchParams } from 'expo-router';
 import { useState } from 'react';
 import { ActivityIndicator, Dimensions, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -6,6 +6,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MangaCard } from '@/components/MangaCard';
 import { SourceLangBar } from '@/components/SourceLangBar';
 import { useTrending } from '@/data/queries';
+import { useGuardedRouter } from '@/lib/useGuardedRouter';
 import { sourceMeta } from '@/lib/sourceMeta';
 import { useSettings } from '@/store/settings.store';
 import { colors, radius, spacing } from '@/theme/colors';
@@ -16,7 +17,7 @@ const GAP = spacing.md;
 type Sort = 'popular' | 'latest';
 
 export default function TopScreen() {
-  const router = useRouter();
+  const router = useGuardedRouter();
   const insets = useSafeAreaInsets();
   const params = useLocalSearchParams<{ sort?: string }>();
   const { selectedSourceId, language } = useSettings();
@@ -64,6 +65,10 @@ export default function TopScreen() {
             data={data}
             keyExtractor={(item) => item.externalId}
             numColumns={COLS}
+            removeClippedSubviews
+            initialNumToRender={9}
+            maxToRenderPerBatch={9}
+            windowSize={5}
             columnWrapperStyle={{ gap: GAP }}
             contentContainerStyle={{
               paddingHorizontal: spacing.lg,

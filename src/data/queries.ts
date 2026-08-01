@@ -4,6 +4,10 @@ import {
   addToLibraryForGroup,
   cacheManga,
   getContinueReading,
+  getDownload,
+  getDownloadedChapterIds,
+  getDownloadedManga,
+  getDownloadsTotalBytes,
   getLibrary,
   getLibraryStatus,
   getDeadChapterKeys,
@@ -22,8 +26,17 @@ import {
 import { clusterSearchResults, findMatches, type WorkCluster } from './sources/match';
 import { SourceManager, SourceRegistry, sourcesInfo } from './sources/registry';
 import type { MangaDetails, MangaSearchResult } from './sources/types';
+import {
+  clearAllDownloads,
+  deleteChapterDownload,
+  deleteMangaDownloads,
+  downloadChapterPages,
+  localPages,
+} from '@/lib/downloads';
 import { genreForTagLanguage, tagLanguageOf } from '@/lib/genreMap';
+import { mapLimit } from '@/lib/pool';
 import { isSourceUsable } from '@/lib/sourceFilter';
+import { downloadKey, useDownloadProgress } from '@/store/downloads.store';
 
 const STALE = 5 * 60 * 1000;
 
@@ -122,11 +135,12 @@ export type ForYouRail = { genre: string; items: WorkCluster[] };
  * the top two. Titles already in the library are filtered out — recommendations
  * should be new. Empty while the library has no genre data yet.
  */
-export function useForYou(enabledLanguages: string[], hiddenSources: string[]) {
+export function useForYou(enabledLanguages: string[], hiddenSources: string[], enabled = true) {
   const langKey = [...enabledLanguages].sort().join(',');
   const hiddenKey = [...hiddenSources].sort().join(',');
   return useQuery({
     queryKey: ['for-you', langKey, hiddenKey],
+    enabled,
     staleTime: STALE,
     queryFn: async (): Promise<ForYouRail[]> => {
       const lib = await getLibrary();
@@ -383,7 +397,18 @@ export function useDeadChapters() {
 export function useChapterPages(sourceId: string, chapterId: string) {
   return useQuery({
     queryKey: ['pages', sourceId, chapterId],
-    queryFn: () => SourceManager.require(sourceId).getChapterPages(chapterId),
+    queryFn: async () => {
+      // Downloaded chapters read from disk — instant, and works offline.
+      const local = await getDownload(sourceId, chapterId);
+      if (local) {
+        try {
+          return localPages(local);
+        } catch {
+          // Corrupt row — fall through to the network.
+        }
+      }
+      return SourceManager.require(sourceId).getChapterPages(chapterId);
+    },
     staleTime: 8 * 60 * 1000,
     gcTime: 8 * 60 * 1000,
   });
@@ -431,8 +456,8 @@ export function useUpdates() {
     queryFn: async (): Promise<UpdateItem[]> => {
       const lib = await getLibrary();
       const started = lib.filter((m) => m.chapter_number != null);
-      const items = await Promise.all(
-        started.map(async (m) => {
+      // Small pool, not the whole library at once (rate limits + JS thread).
+      const items = await mapLimit(started, 4, async (m) => {
           const lang = m.language || 'en';
           try {
             const chapters = await qc.fetchQuery({
@@ -470,8 +495,7 @@ export function useUpdates() {
           } catch {
             return null;
           }
-        }),
-      );
+      });
       return items
         .filter((x): x is UpdateItem => x !== null)
         .sort((a, b) => b.unread - a.unread || (b.lastReadAt ?? 0) - (a.lastReadAt ?? 0));
@@ -487,6 +511,95 @@ export function useReadChapters(sourceId: string, externalId: string) {
     queryFn: () => getReadChapterIds(sourceId, externalId),
     staleTime: 0,
   });
+}
+
+// ---- Offline downloads ----
+
+/** Chapter ids of this title already saved to the device. */
+export function useDownloadedChapters(sourceId: string, externalId: string) {
+  return useQuery({
+    queryKey: ['downloaded-chapters', sourceId, externalId],
+    queryFn: () => getDownloadedChapterIds(sourceId, externalId),
+    staleTime: 0,
+  });
+}
+
+/** Downloads grouped per title, for the Library "Downloads" view. */
+export function useDownloadedManga() {
+  return useQuery({
+    queryKey: ['downloads'],
+    queryFn: () => getDownloadedManga(),
+    staleTime: 0,
+  });
+}
+
+/** Total bytes on disk, for the Settings storage row. */
+export function useDownloadsSize() {
+  return useQuery({
+    queryKey: ['downloads-bytes'],
+    queryFn: () => getDownloadsTotalBytes(),
+    staleTime: 0,
+  });
+}
+
+/**
+ * Download one chapter: fetch its page list (shared query cache), then save
+ * every page to disk. Progress streams into the downloads store for the UI.
+ */
+export function useDownloadChapter(sourceId: string, mangaExternalId: string, language: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (v: { chapterId: string; chapterNumber?: string | null }) => {
+      const key = downloadKey(sourceId, v.chapterId);
+      const progress = useDownloadProgress.getState();
+      progress.start(key, 0);
+      try {
+        const pages = await qc.fetchQuery({
+          queryKey: ['pages', sourceId, v.chapterId],
+          queryFn: () => SourceManager.require(sourceId).getChapterPages(v.chapterId),
+          staleTime: 0, // page URLs expire — always fetch fresh for a download
+        });
+        await downloadChapterPages({
+          sourceId,
+          mangaExternalId,
+          chapterId: v.chapterId,
+          chapterNumber: v.chapterNumber,
+          language,
+          pages,
+          onProgress: (done, total) => useDownloadProgress.getState().tick(key, done, total),
+        });
+      } finally {
+        useDownloadProgress.getState().clear(key);
+      }
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['downloaded-chapters', sourceId, mangaExternalId] });
+      qc.invalidateQueries({ queryKey: ['downloads'] });
+      qc.invalidateQueries({ queryKey: ['downloads-bytes'] });
+    },
+  });
+}
+
+/** Remove one chapter's files, or a whole title's, or everything. */
+export function useDeleteDownload() {
+  const qc = useQueryClient();
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ['downloaded-chapters'] });
+    qc.invalidateQueries({ queryKey: ['downloads'] });
+    qc.invalidateQueries({ queryKey: ['downloads-bytes'] });
+  };
+  const chapter = useMutation({
+    mutationFn: (v: { sourceId: string; chapterId: string }) =>
+      deleteChapterDownload(v.sourceId, v.chapterId),
+    onSuccess: invalidate,
+  });
+  const manga = useMutation({
+    mutationFn: (v: { sourceId: string; mangaExternalId: string }) =>
+      deleteMangaDownloads(v.sourceId, v.mangaExternalId),
+    onSuccess: invalidate,
+  });
+  const all = useMutation({ mutationFn: () => clearAllDownloads(), onSuccess: invalidate });
+  return { chapter, manga, all };
 }
 
 /** A work's preferred source+language (what to open by default). */

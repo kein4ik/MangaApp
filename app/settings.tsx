@@ -1,4 +1,5 @@
 import { useQueryClient } from '@tanstack/react-query';
+import { useEffect, useState } from 'react';
 import Constants from 'expo-constants';
 import { Image } from 'expo-image';
 import { Stack, useRouter } from 'expo-router';
@@ -15,12 +16,14 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { languageLabel } from '@/components/languages';
 import { clearLibrary, clearReadingProgress } from '@/data/local/db';
-import { useSourcesQuery } from '@/data/queries';
+import { fmtBytes } from '@/lib/format';
+import { useDeleteDownload, useDownloadsSize, useSourcesQuery } from '@/data/queries';
 import { registerChapterCheck, unregisterChapterCheck } from '@/lib/backgroundUpdates';
 import { checkForNewChapters } from '@/lib/chapterCheck';
 import { ensureNotificationPermission, setupAndroidChannel } from '@/lib/notifications';
-import { setNotifyEnabledFlag } from '@/lib/notifyPrefs';
+import { getLastBackgroundRun, setNotifyEnabledFlag } from '@/lib/notifyPrefs';
 import { isExpoGo } from '@/lib/runtime';
+import { timeAgo } from '@/lib/time';
 import { sourceMeta } from '@/lib/sourceMeta';
 import { contentLanguages, isSourceUsable } from '@/lib/sourceFilter';
 import { useReaderSettings } from '@/store/reader.store';
@@ -36,6 +39,13 @@ export default function SettingsScreen() {
   const reader = useReaderSettings();
   const { recent, clearRecent } = useSearchHistory();
   const sources = useSourcesQuery();
+  const downloadsSize = useDownloadsSize();
+  const deleteDownload = useDeleteDownload();
+  // When the OS last actually ran the background chapter check.
+  const [lastRun, setLastRun] = useState<number | null>(null);
+  useEffect(() => {
+    getLastBackgroundRun().then(setLastRun);
+  }, []);
   const {
     enabledLanguages,
     hiddenSources,
@@ -165,6 +175,15 @@ export default function SettingsScreen() {
             onChange={onToggleNotify}
           />
           <ActionRow label="Check for updates now" onPress={onCheckNow} />
+          {notifyChapters && (
+            <Text style={styles.note}>
+              {lastRun
+                ? `Background check last ran ${timeAgo(lastRun)}.`
+                : 'Waiting for the first background check.'}
+              {'\n'}Android decides when background checks run (usually every few hours). For
+              faster alerts, exclude MangaApp from battery optimization in your system settings.
+            </Text>
+          )}
         </Section>
 
         {/* ---------- Content languages ---------- */}
@@ -225,6 +244,16 @@ export default function SettingsScreen() {
               Image.clearDiskCache();
               Alert.alert('Done', 'Image cache cleared.');
             }}
+          />
+          <ActionRow
+            label="Clear downloads"
+            value={fmtBytes(downloadsSize.data ?? 0)}
+            danger
+            onPress={() =>
+              confirm('Clear downloads?', 'All chapters saved for offline reading will be removed.', () =>
+                deleteDownload.all.mutate(),
+              )
+            }
           />
           <ActionRow
             label="Clear reading progress"

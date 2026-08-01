@@ -1,8 +1,9 @@
 import { Ionicons } from '@expo/vector-icons';
+import { FlashList } from '@shopify/flash-list';
 import { useQueryClient } from '@tanstack/react-query';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
-import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
+import { Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
 
 import { imageSource } from '@/lib/imageSource';
 import { cleanDescription } from '@/lib/text';
@@ -32,6 +33,9 @@ import {
   useReadableFallback,
   useReadChapters,
   useReadChapterNumbers,
+  useDeleteDownload,
+  useDownloadChapter,
+  useDownloadedChapters,
   useSetLibraryStatus,
   useSimilar,
   sourceSupportsGenres,
@@ -47,6 +51,8 @@ import { languageLabel } from '@/components/languages';
 import { BottomSheet } from '@/components/BottomSheet';
 import { MangaCard } from '@/components/MangaCard';
 import { sourceMeta } from '@/lib/sourceMeta';
+import { useGuardedRouter } from '@/lib/useGuardedRouter';
+import { downloadKey, useDownloadProgress } from '@/store/downloads.store';
 import { useSettings } from '@/store/settings.store';
 import { colors, radius, spacing } from '@/theme/colors';
 import { typography } from '@/theme/typography';
@@ -61,7 +67,7 @@ const STATUS_LABELS: Record<LibraryStatus, string> = {
 const STATUS_KEYS = Object.keys(STATUS_LABELS) as LibraryStatus[];
 
 export default function MangaDetailsScreen() {
-  const router = useRouter();
+  const router = useGuardedRouter();
   const qc = useQueryClient();
   const insets = useSafeAreaInsets();
   const { id: routeId, sourceId: routeSourceId } = useLocalSearchParams<{
@@ -99,10 +105,31 @@ export default function MangaDetailsScreen() {
   const libStatus = useLibraryStatus(sourceId, id);
   const toggleFavorite = useToggleFavorite(mangaRef);
   const setStatus = useSetLibraryStatus(sourceId, id, mangaRef);
-  const matches = useMatches(details.data, sourceId, enabledLanguages, hiddenSources);
+  // Secondary discovery queries wait for the primary content (chapters) so the
+  // first seconds of the screen aren't a burst of a dozen parallel fetches —
+  // that burst blocked the JS thread and made the Read button eat first taps.
+  const contentReady = chapters.isFetched;
+  const matches = useMatches(
+    contentReady ? details.data : undefined,
+    sourceId,
+    enabledLanguages,
+    hiddenSources,
+  );
   const crossProgress = useCrossSourceProgress(matches.data);
+  // Offline downloads for this title's chapters.
+  const downloadedIds = useDownloadedChapters(sourceId, id);
+  const dlSet = useMemo(() => new Set(downloadedIds.data ?? []), [downloadedIds.data]);
+  const dlActive = useDownloadProgress((s) => s.active);
+  const downloadChapter = useDownloadChapter(sourceId, id, lang);
+  const deleteDownload = useDeleteDownload();
+
   const genresBrowsable = sourceSupportsGenres(sourceId);
-  const similar = useSimilar(sourceId, genresBrowsable ? details.data?.genres : undefined, id, lang);
+  const similar = useSimilar(
+    sourceId,
+    genresBrowsable && contentReady ? details.data?.genres : undefined,
+    id,
+    lang,
+  );
   const [statusOpen, setStatusOpen] = useState(false);
 
   // The full set of sources this work is available on (route entry + every
@@ -344,7 +371,9 @@ export default function MangaDetailsScreen() {
   return (
     <>
       <Stack.Screen options={{ headerShown: false }} />
-      <FlatList
+      {/* FlashList recycles rows — a 1000-chapter list scrolls without the
+          stutter a plain FlatList showed when mounting every row. */}
+      <FlashList
         style={styles.screen}
         data={canRead ? displayedChapters : []}
         keyExtractor={(c) => c.externalId}
@@ -676,9 +705,9 @@ export default function MangaDetailsScreen() {
                 )}
                 {chapters.data && chapters.data.length === 0 && !chapters.isLoading && (
                   <Text style={styles.muted}>
-                    No readable chapters here. {source?.name ?? 'This source'} may have
-                    licensed this title (chapters link out). Try another source from the
-                    Sources tab — popular titles often read on Mangapill, MangaLib or Remanga.
+                    {m.contentRating?.includes('18')
+                      ? `This is an 18+ title — ${source?.name ?? 'this source'} only shows its chapters to logged-in users on their website. If it's available on another source, a "Read on" option will appear above.`
+                      : `No readable chapters here. ${source?.name ?? 'This source'} may have licensed this title (chapters link out). Try another source from the Sources tab — popular titles often read on Mangapill, MangaLib or Remanga.`}
                   </Text>
                 )}
                 {chapters.data && chapters.data.length > 0 && displayedChapters.length === 0 && (
@@ -724,6 +753,48 @@ export default function MangaDetailsScreen() {
                 ) : null}
               </View>
               {isCurrent && <Text style={styles.currentTag}>reading</Text>}
+              {(() => {
+                const key = downloadKey(sourceId, item.externalId);
+                const active = dlActive[key];
+                const isDownloaded = dlSet.has(item.externalId);
+                return (
+                  <Pressable
+                    hitSlop={10}
+                    style={styles.readToggle}
+                    onPress={() => {
+                      if (active) return;
+                      if (isDownloaded) {
+                        Alert.alert('Delete download?', 'This chapter will be removed from the device.', [
+                          { text: 'Cancel', style: 'cancel' },
+                          {
+                            text: 'Delete',
+                            style: 'destructive',
+                            onPress: () =>
+                              deleteDownload.chapter.mutate({ sourceId, chapterId: item.externalId }),
+                          },
+                        ]);
+                      } else {
+                        downloadChapter.mutate({
+                          chapterId: item.externalId,
+                          chapterNumber: item.chapterNumber,
+                        });
+                      }
+                    }}
+                  >
+                    {active ? (
+                      <Text style={styles.dlProgress}>
+                        {active.total ? `${active.done}/${active.total}` : '…'}
+                      </Text>
+                    ) : (
+                      <Ionicons
+                        name={isDownloaded ? 'arrow-down-circle' : 'arrow-down-circle-outline'}
+                        size={22}
+                        color={isDownloaded ? colors.accent : colors.textFaint}
+                      />
+                    )}
+                  </Pressable>
+                );
+              })()}
               <Pressable
                 hitSlop={12}
                 style={styles.readToggle}
@@ -889,6 +960,7 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
   },
   genrePillText: { ...typography.tiny, color: colors.purple, fontWeight: '600' },
+  dlProgress: { ...typography.tiny, color: colors.accent, fontWeight: '700', minWidth: 34, textAlign: 'center' },
   similarSection: { marginTop: spacing.xl, gap: spacing.md },
   similarHeading: {
     ...typography.h3,

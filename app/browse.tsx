@@ -1,10 +1,11 @@
-import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
+import { Stack, useLocalSearchParams } from 'expo-router';
 import { ActivityIndicator, Dimensions, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { MangaCard } from '@/components/MangaCard';
 import { useBrowseGenreAll } from '@/data/queries';
 import { sourceMeta } from '@/lib/sourceMeta';
+import { useGuardedRouter } from '@/lib/useGuardedRouter';
 import { useSettings } from '@/store/settings.store';
 import { colors, radius, spacing } from '@/theme/colors';
 import { typography } from '@/theme/typography';
@@ -18,7 +19,7 @@ const GAP = spacing.md;
  * take part, and the genre name is translated per source (EN↔RU).
  */
 export default function BrowseScreen() {
-  const router = useRouter();
+  const router = useGuardedRouter();
   const insets = useSafeAreaInsets();
   const params = useLocalSearchParams<{ genre?: string }>();
   const genre = params.genre ?? '';
@@ -58,6 +59,10 @@ export default function BrowseScreen() {
             data={data}
             keyExtractor={(item) => item.key}
             numColumns={COLS}
+            removeClippedSubviews
+            initialNumToRender={9}
+            maxToRenderPerBatch={9}
+            windowSize={5}
             columnWrapperStyle={{ gap: GAP }}
             contentContainerStyle={{
               paddingHorizontal: spacing.lg,

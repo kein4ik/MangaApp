@@ -1,7 +1,7 @@
 import { FlashList } from '@shopify/flash-list';
 import { Image } from 'expo-image';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useLocalSearchParams } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -32,6 +32,7 @@ import { ReaderSettingsSheet } from '@/components/ReaderSettingsSheet';
 import { useQueryClient } from '@tanstack/react-query';
 
 import { useChapterPages, useChapters } from '@/data/queries';
+import { useGuardedRouter } from '@/lib/useGuardedRouter';
 import { SourceManager } from '@/data/sources/registry';
 import { saveProgress } from '@/data/local/db';
 import { useReaderSettings } from '@/store/reader.store';
@@ -101,7 +102,7 @@ function PageImage({ page, gap }: { page: ChapterPage; gap: number }) {
 }
 
 export default function ReaderScreen() {
-  const router = useRouter();
+  const router = useGuardedRouter();
   const insets = useSafeAreaInsets();
   const params = useLocalSearchParams<{
     chapterId: string;

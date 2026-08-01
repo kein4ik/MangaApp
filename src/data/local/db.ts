@@ -79,6 +79,23 @@ async function init(): Promise<SQLite.SQLiteDatabase> {
       PRIMARY KEY (source_id, external_id, language)
     );
 
+    -- Chapters saved to device storage for offline reading. A row exists only
+    -- for COMPLETED downloads (files land first, then the row) — in-flight
+    -- progress lives in memory, so a killed app never leaves phantom rows.
+    CREATE TABLE IF NOT EXISTS downloads (
+      source_id TEXT NOT NULL,
+      manga_external_id TEXT NOT NULL,
+      chapter_id TEXT NOT NULL,
+      chapter_number TEXT,
+      language TEXT NOT NULL,
+      dir TEXT NOT NULL,
+      pages TEXT NOT NULL,
+      bytes INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (source_id, chapter_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_downloads_manga ON downloads (source_id, manga_external_id);
+
     -- Highest chapter we've already told the user about, per library title, so
     -- the background checker only fires a notification for genuinely new chapters
     -- (the first sighting of a title records a baseline and stays silent).
@@ -236,6 +253,137 @@ export async function getReadChapterIds(
     mangaExternalId,
   );
   return rows.map((r) => r.chapter_id);
+}
+
+// ---- downloads (offline chapters) ----
+export type DownloadRow = {
+  source_id: string;
+  manga_external_id: string;
+  chapter_id: string;
+  chapter_number: string | null;
+  language: string;
+  /** file:// URI of the chapter's directory. */
+  dir: string;
+  /** JSON array of { file, width?, height? } in page order. */
+  pages: string;
+  bytes: number;
+  created_at: number;
+};
+
+export async function addDownload(row: Omit<DownloadRow, 'created_at'>): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(
+    `INSERT OR REPLACE INTO downloads
+      (source_id, manga_external_id, chapter_id, chapter_number, language, dir, pages, bytes, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    row.source_id,
+    row.manga_external_id,
+    row.chapter_id,
+    row.chapter_number,
+    row.language,
+    row.dir,
+    row.pages,
+    row.bytes,
+    Date.now(),
+  );
+}
+
+export async function getDownload(
+  sourceId: string,
+  chapterId: string,
+): Promise<DownloadRow | null> {
+  const db = await getDb();
+  return (
+    (await db.getFirstAsync<DownloadRow>(
+      `SELECT * FROM downloads WHERE source_id = ? AND chapter_id = ?`,
+      sourceId,
+      chapterId,
+    )) ?? null
+  );
+}
+
+export async function getDownloadedChapterIds(
+  sourceId: string,
+  mangaExternalId: string,
+): Promise<string[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{ chapter_id: string }>(
+    `SELECT chapter_id FROM downloads WHERE source_id = ? AND manga_external_id = ?`,
+    sourceId,
+    mangaExternalId,
+  );
+  return rows.map((r) => r.chapter_id);
+}
+
+export type DownloadedManga = {
+  source_id: string;
+  manga_external_id: string;
+  title: string;
+  cover_url: string | null;
+  chapters: number;
+  bytes: number;
+  latest_at: number;
+};
+
+/** Downloads grouped per title (joined with the cached title/cover), newest first. */
+export async function getDownloadedManga(): Promise<DownloadedManga[]> {
+  const db = await getDb();
+  return db.getAllAsync<DownloadedManga>(
+    `SELECT d.source_id, d.manga_external_id,
+            COALESCE(m.title, d.manga_external_id) AS title, m.cover_url,
+            COUNT(*) AS chapters, SUM(d.bytes) AS bytes, MAX(d.created_at) AS latest_at
+     FROM downloads d
+     LEFT JOIN cached_manga m
+       ON m.source_id = d.source_id AND m.external_id = d.manga_external_id
+     GROUP BY d.source_id, d.manga_external_id
+     ORDER BY latest_at DESC`,
+  );
+}
+
+export async function getMangaDownloadRows(
+  sourceId: string,
+  mangaExternalId: string,
+): Promise<{ chapter_id: string; dir: string }[]> {
+  const db = await getDb();
+  return db.getAllAsync<{ chapter_id: string; dir: string }>(
+    `SELECT chapter_id, dir FROM downloads WHERE source_id = ? AND manga_external_id = ?`,
+    sourceId,
+    mangaExternalId,
+  );
+}
+
+export async function removeDownload(sourceId: string, chapterId: string): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(
+    `DELETE FROM downloads WHERE source_id = ? AND chapter_id = ?`,
+    sourceId,
+    chapterId,
+  );
+}
+
+export async function removeMangaDownloads(
+  sourceId: string,
+  mangaExternalId: string,
+): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(
+    `DELETE FROM downloads WHERE source_id = ? AND manga_external_id = ?`,
+    sourceId,
+    mangaExternalId,
+  );
+}
+
+export async function getDownloadsTotalBytes(): Promise<number> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ total: number | null }>(
+    `SELECT SUM(bytes) AS total FROM downloads`,
+  );
+  return row?.total ?? 0;
+}
+
+export async function clearDownloadsTable(): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(`DELETE FROM downloads`);
 }
 
 // ---- notify_watermark (background new-chapter notifications) ----

@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
-import { useFocusEffect, useRouter } from 'expo-router';
+import { useFocusEffect } from 'expo-router';
 import { useCallback, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
@@ -16,13 +16,14 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useUpdates } from '@/data/queries';
 import { imageSource } from '@/lib/imageSource';
 import { sourceMeta } from '@/lib/sourceMeta';
+import { useGuardedRouter } from '@/lib/useGuardedRouter';
 import { colors, radius, spacing } from '@/theme/colors';
 import { typography } from '@/theme/typography';
 
 type Filter = 'all' | 'en' | 'ru';
 
 export default function UpdatesScreen() {
-  const router = useRouter();
+  const router = useGuardedRouter();
   const insets = useSafeAreaInsets();
   const { data, isLoading, isFetching, refetch } = useUpdates();
   const [filter, setFilter] = useState<Filter>('all');
@@ -112,6 +113,9 @@ export default function UpdatesScreen() {
         <FlatList
           data={items}
           keyExtractor={(item) => `${item.sourceId}:${item.externalId}`}
+          removeClippedSubviews
+          initialNumToRender={8}
+          windowSize={5}
           contentContainerStyle={{ paddingBottom: insets.bottom + spacing.xxl }}
           refreshControl={
             <RefreshControl refreshing={isFetching} onRefresh={refetch} tintColor={colors.accent} />

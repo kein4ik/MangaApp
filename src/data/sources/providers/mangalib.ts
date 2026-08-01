@@ -9,17 +9,28 @@ import type {
   SearchOptions,
 } from '../types';
 
-const API = 'https://api2.mangalib.me/api';
+/**
+ * The Lib backend answers on several domains. Some ISPs/carriers block
+ * mangalib.me while cdnlibs.org still resolves — getJSON fails over between
+ * them (sticky: keeps using whichever host worked last).
+ */
+const API_HOSTS = ['https://api2.mangalib.me/api', 'https://api.cdnlibs.org/api'];
 const SITE_ID = '1';
 const IMAGE_REFERER = 'https://mangalib.me/';
 const FALLBACK_IMAGE_SERVER = 'https://img2.imglib.info';
 const CHID_SEP = '~';
 
+// Mimic the site's own browser traffic as closely as possible (mobile Chrome
+// UA + Origin/Referer of the site) — some networks/filters treat "app-looking"
+// clients differently from browsers even when the same URL works in a browser.
 const HEADERS = {
   'Site-Id': SITE_ID,
   Accept: 'application/json',
+  'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
+  Origin: 'https://mangalib.me',
+  Referer: 'https://mangalib.me/',
   'User-Agent':
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
+    'Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
 };
 
 type MlCover = { default?: string; thumbnail?: string };
@@ -34,6 +45,8 @@ type MlManga = {
   status?: { id?: number };
   genres?: { name: string }[];
   authors?: { name: string }[];
+  /** id 4 = 18+. MangaLib serves NO chapters for 18+ titles anonymously. */
+  ageRestriction?: { id?: number; label?: string };
 };
 type MlChapter = {
   volume: string;
@@ -43,10 +56,50 @@ type MlChapter = {
 };
 type MlPage = { url: string; height?: number; width?: number };
 
-async function getJSON<T>(url: string): Promise<T> {
-  const res = await fetchWithTimeout(url, { headers: HEADERS });
-  if (!res.ok) throw new Error(`MangaLib ${res.status}`);
-  return (await res.json()) as T;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+class HttpStatusError extends Error {
+  constructor(public status: number) {
+    super(`MangaLib ${status}`);
+  }
+}
+
+/** One host attempt with a single short-backoff retry on 429/5xx (rate limits). */
+async function fetchHost<T>(base: string, path: string): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetchWithTimeout(`${base}${path}`, { headers: HEADERS });
+    if (res.ok) return (await res.json()) as T;
+    if (attempt === 0 && (res.status === 429 || res.status >= 500)) {
+      await sleep(1500);
+      continue;
+    }
+    throw new HttpStatusError(res.status);
+  }
+}
+
+let preferredHost = 0;
+
+/** Fetch with host failover — `path` starts with '/', e.g. `/manga?...`. */
+async function getJSON<T>(path: string): Promise<T> {
+  let lastError: unknown;
+  for (let i = 0; i < API_HOSTS.length; i++) {
+    const idx = (preferredHost + i) % API_HOSTS.length;
+    try {
+      const data = await fetchHost<T>(API_HOSTS[idx], path);
+      preferredHost = idx;
+      return data;
+    } catch (e) {
+      // Surfaced in the Metro terminal so a device-only failure is debuggable.
+      if (__DEV__) {
+        console.warn(`[mangalib] ${API_HOSTS[idx]}${path.slice(0, 60)} → ${String(e)}`);
+      }
+      // A definitive client answer (404 etc.) is the same on every mirror —
+      // only fail over on network errors, rate limits and 5xx.
+      if (e instanceof HttpStatusError && e.status !== 429 && e.status < 500) throw e;
+      lastError = e;
+    }
+  }
+  throw lastError;
 }
 
 function mapStatus(id?: number): MangaStatus {
@@ -90,7 +143,7 @@ async function imageServer(): Promise<string> {
   try {
     const data = await getJSON<{
       data: { imageServers: { id: string; url: string; site_ids: number[] }[] };
-    }>(`${API}/constants?fields[]=imageServers`);
+    }>(`/constants?fields[]=imageServers`);
     const main = data.data.imageServers.find(
       (s) => s.id === 'main' && s.site_ids.includes(1) && s.url,
     );
@@ -111,7 +164,7 @@ async function genreMap(): Promise<Map<string, string>> {
   const map = new Map<string, string>();
   try {
     const data = await getJSON<{ data: { genres: { id: number; name: string }[] } }>(
-      `${API}/constants?fields[]=genres`,
+      `/constants?fields[]=genres`,
     );
     for (const g of data.data.genres) {
       if (g.name) map.set(g.name.toLowerCase(), String(g.id));
@@ -135,7 +188,7 @@ export class MangaLibProvider implements SourceProvider {
     const p = new URLSearchParams();
     p.append('site_id[]', SITE_ID);
     p.set('sort_by', options?.sort === 'latest' ? 'last_chapter_at' : 'views');
-    const data = await getJSON<{ data: MlManga[] }>(`${API}/manga?${p}`);
+    const data = await getJSON<{ data: MlManga[] }>(`/manga?${p}`);
     return data.data.slice(0, options?.limit ?? 30).map(toResult);
   }
 
@@ -143,7 +196,7 @@ export class MangaLibProvider implements SourceProvider {
     const p = new URLSearchParams();
     p.set('q', query);
     p.append('site_id[]', SITE_ID);
-    const data = await getJSON<{ data: MlManga[] }>(`${API}/manga?${p}`);
+    const data = await getJSON<{ data: MlManga[] }>(`/manga?${p}`);
     return data.data.slice(0, options?.limit ?? 30).map(toResult);
   }
 
@@ -155,15 +208,18 @@ export class MangaLibProvider implements SourceProvider {
     p.append('site_id[]', SITE_ID);
     p.append('genres[]', id);
     p.set('sort_by', options?.sort === 'latest' ? 'last_chapter_at' : 'views');
-    const data = await getJSON<{ data: MlManga[] }>(`${API}/manga?${p}`);
+    const data = await getJSON<{ data: MlManga[] }>(`/manga?${p}`);
     return data.data.slice(0, options?.limit ?? 30).map(toResult);
   }
 
   async getMangaDetails(externalId: string): Promise<MangaDetails> {
     const p = new URLSearchParams();
+    // NOTE: fields[] is validated by the API — an unknown name 422s the whole
+    // request (asking for ageRestriction broke every details load once).
+    // ageRestriction is returned by default anyway.
     ['summary', 'authors', 'genres', 'status_id'].forEach((f) => p.append('fields[]', f));
     const data = await getJSON<{ data: MlManga }>(
-      `${API}/manga/${encodeURIComponent(externalId)}?${p}`,
+      `/manga/${encodeURIComponent(externalId)}?${p}`,
     );
     const m = data.data;
     return {
@@ -171,12 +227,14 @@ export class MangaLibProvider implements SourceProvider {
       description: flattenSummary(m.summary).trim(),
       authors: m.authors?.map((a) => a.name).filter(Boolean),
       genres: m.genres?.map((g) => g.name).filter(Boolean),
+      // Surfaced so the UI can explain WHY chapters are empty (login-walled).
+      contentRating: m.ageRestriction?.id === 4 ? '18+' : m.ageRestriction?.label,
     };
   }
 
   async getChapters(externalId: string): Promise<Chapter[]> {
     const data = await getJSON<{ data: MlChapter[] }>(
-      `${API}/manga/${encodeURIComponent(externalId)}/chapters`,
+      `/manga/${encodeURIComponent(externalId)}/chapters`,
     );
     if (!Array.isArray(data.data)) return [];
     return data.data.map((ch) => {
@@ -203,7 +261,7 @@ export class MangaLibProvider implements SourceProvider {
     if (branchId) p.set('branch_id', branchId);
     const [data, server] = await Promise.all([
       getJSON<{ data: { pages?: MlPage[] } }>(
-        `${API}/manga/${encodeURIComponent(slug)}/chapter?${p}`,
+        `/manga/${encodeURIComponent(slug)}/chapter?${p}`,
       ),
       imageServer(),
     ]);

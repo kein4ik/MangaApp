@@ -35,6 +35,9 @@ type RmTitle = {
   genres?: { name: string }[];
   branches?: { id: number; total_chapters?: number | null }[];
   publishers?: { name: string }[];
+  /** Flagged titles are login-walled on Remanga (chapters hidden anonymously). */
+  is_erotic?: boolean;
+  is_yaoi?: boolean;
 };
 type RmChapter = { id: number; chapter?: string; tome?: number; name?: string; is_paid?: boolean };
 type RmPage = { link: string; height?: number; width?: number };
@@ -162,6 +165,7 @@ export class RemangaProvider implements SourceProvider {
       authors,
       genres: t.genres?.map((g) => g.name).filter(Boolean),
       year: t.issue_year,
+      contentRating: t.is_erotic || t.is_yaoi ? '18+' : undefined,
     };
   }
 

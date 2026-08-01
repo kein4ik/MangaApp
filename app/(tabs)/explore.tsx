@@ -1,4 +1,4 @@
-import { useRouter } from 'expo-router';
+import { useGuardedRouter } from '@/lib/useGuardedRouter';
 import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
@@ -30,7 +30,7 @@ type Status = 'all' | 'ongoing' | 'completed';
 type Scope = 'all' | 'source';
 
 export default function ExploreScreen() {
-  const router = useRouter();
+  const router = useGuardedRouter();
   const insets = useSafeAreaInsets();
   const { selectedSourceId, language, enabledLanguages, hiddenSources } = useSettings();
   const { recent, addRecent, removeRecent, clearRecent } = useSearchHistory();
@@ -213,6 +213,10 @@ export default function ExploreScreen() {
           data={results}
           keyExtractor={(item) => item.key}
           numColumns={COLS}
+          removeClippedSubviews
+          initialNumToRender={9}
+          maxToRenderPerBatch={9}
+          windowSize={5}
           columnWrapperStyle={{ gap: GAP }}
           contentContainerStyle={{
             paddingHorizontal: spacing.lg,

@@ -6,6 +6,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { HealthBadge } from '@/components/HealthBadge';
 import { SourceRegistry } from '@/data/sources/registry';
 import { testSource, type SourceDiag } from '@/data/sources/diagnostics';
+import { mapLimit } from '@/lib/pool';
 import { sourceMeta } from '@/lib/sourceMeta';
 import { useSettings } from '@/store/settings.store';
 import { colors, radius, spacing } from '@/theme/colors';
@@ -25,7 +26,9 @@ export default function DiagnosticsScreen() {
   }, []);
 
   const runAll = useCallback(() => {
-    SOURCES.forEach((s) => runOne(s.id));
+    // Two at a time: a full-parallel run distorts every source's timings
+    // (contention makes healthy sources look "slow") and trips rate limits.
+    void mapLimit(SOURCES, 2, (s) => runOne(s.id));
   }, [runOne]);
 
   useEffect(() => {

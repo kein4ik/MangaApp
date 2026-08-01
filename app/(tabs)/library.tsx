@@ -1,11 +1,14 @@
+import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
-import { useFocusEffect, useRouter } from 'expo-router';
+import { useFocusEffect } from 'expo-router';
 import { useCallback, useMemo, useState } from 'react';
-import { FlatList, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Alert, FlatList, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { useLibrary } from '@/data/queries';
+import { useDeleteDownload, useDownloadedManga, useLibrary } from '@/data/queries';
 import type { LibraryRow } from '@/data/local/db';
+import { fmtBytes } from '@/lib/format';
+import { useGuardedRouter } from '@/lib/useGuardedRouter';
 import { imageSource } from '@/lib/imageSource';
 import { sourceMeta } from '@/lib/sourceMeta';
 import { timeAgo } from '@/lib/time';
@@ -20,30 +23,38 @@ const CATEGORIES = [
   { key: 'completed', label: 'Completed' },
   { key: 'dropped', label: 'Dropped' },
   { key: 'favourites', label: 'Favourites' },
+  { key: 'downloads', label: 'Downloads' },
 ] as const;
 type CatKey = (typeof CATEGORIES)[number]['key'];
 
 function matches(item: LibraryRow, cat: CatKey): boolean {
-  if (cat === 'all') return true;
+  if (cat === 'all' || cat === 'downloads') return true;
   if (cat === 'favourites') return item.favorite === 1;
   return item.status === cat;
 }
 
 export default function LibraryScreen() {
-  const router = useRouter();
+  const router = useGuardedRouter();
   const insets = useSafeAreaInsets();
   const { data, refetch } = useLibrary();
+  const downloads = useDownloadedManga();
+  const deleteDownload = useDeleteDownload();
   const [cat, setCat] = useState<CatKey>('all');
 
+  const refetchDownloads = downloads.refetch;
   useFocusEffect(
     useCallback(() => {
       refetch();
-    }, [refetch]),
+      refetchDownloads();
+    }, [refetch, refetchDownloads]),
   );
 
   const all = useMemo(() => data ?? [], [data]);
   const list = useMemo(() => all.filter((i) => matches(i, cat)), [all, cat]);
-  const countFor = (k: CatKey) => all.filter((i) => matches(i, k)).length;
+  const countFor = (k: CatKey) =>
+    k === 'downloads'
+      ? (downloads.data?.length ?? 0)
+      : all.filter((i) => matches(i, k)).length;
 
   return (
     <View style={[styles.screen, { paddingTop: insets.top + spacing.md }]}>
@@ -74,7 +85,71 @@ export default function LibraryScreen() {
         </ScrollView>
       </View>
 
-      {list.length === 0 ? (
+      {cat === 'downloads' ? (
+        (downloads.data?.length ?? 0) === 0 ? (
+          <View style={styles.empty}>
+            <Text style={styles.emptyText}>No downloads yet</Text>
+            <Text style={styles.emptyHint}>
+              Save chapters with the ⬇ button on a manga’s chapter list — they’ll read offline
+              from here.
+            </Text>
+          </View>
+        ) : (
+          <FlatList
+            data={downloads.data}
+            keyExtractor={(item) => `${item.source_id}:${item.manga_external_id}`}
+            contentContainerStyle={{ paddingBottom: insets.bottom + spacing.xxl }}
+            renderItem={({ item }) => (
+              <Pressable
+                style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
+                onPress={() =>
+                  router.push({
+                    pathname: '/manga/[id]',
+                    params: { id: item.manga_external_id, sourceId: item.source_id },
+                  })
+                }
+              >
+                <Image source={imageSource(item.cover_url)} style={styles.cover} contentFit="cover" />
+                <View style={styles.rowInfo}>
+                  <Text style={styles.rowTitle} numberOfLines={1}>{item.title}</Text>
+                  <View style={styles.rowMetaLine}>
+                    <View
+                      style={[styles.srcDot, { backgroundColor: sourceMeta(item.source_id).color }]}
+                    />
+                    <Text style={styles.rowChapter}>{sourceMeta(item.source_id).name}</Text>
+                  </View>
+                  <Text style={styles.rowPct}>
+                    {item.chapters} chapter{item.chapters > 1 ? 's' : ''} · {fmtBytes(item.bytes)} · offline
+                  </Text>
+                </View>
+                <Pressable
+                  hitSlop={10}
+                  onPress={() =>
+                    Alert.alert(
+                      'Delete downloads?',
+                      `All ${item.chapters} downloaded chapter${item.chapters > 1 ? 's' : ''} of “${item.title}” will be removed from the device.`,
+                      [
+                        { text: 'Cancel', style: 'cancel' },
+                        {
+                          text: 'Delete',
+                          style: 'destructive',
+                          onPress: () =>
+                            deleteDownload.manga.mutate({
+                              sourceId: item.source_id,
+                              mangaExternalId: item.manga_external_id,
+                            }),
+                        },
+                      ],
+                    )
+                  }
+                >
+                  <Ionicons name="trash-outline" size={20} color={colors.textFaint} />
+                </Pressable>
+              </Pressable>
+            )}
+          />
+        )
+      ) : list.length === 0 ? (
         <View style={styles.empty}>
           <Text style={styles.emptyText}>
             {cat === 'all' ? 'Your library is empty' : 'Nothing here yet'}
@@ -89,6 +164,9 @@ export default function LibraryScreen() {
         <FlatList
           data={list}
           keyExtractor={(item) => `${item.source_id}:${item.external_id}`}
+          removeClippedSubviews
+          initialNumToRender={8}
+          windowSize={5}
           contentContainerStyle={{ paddingBottom: insets.bottom + spacing.xxl }}
           renderItem={({ item }) => {
             const pct = Math.round((item.percent ?? 0) * 100);
