@@ -1,9 +1,10 @@
 import { Stack, useLocalSearchParams } from 'expo-router';
 import { useState } from 'react';
-import { ActivityIndicator, Dimensions, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Dimensions, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { MangaCard } from '@/components/MangaCard';
+import { GridSkeleton } from '@/components/Skeleton';
 import { SourceLangBar } from '@/components/SourceLangBar';
 import { useTrending } from '@/data/queries';
 import { useGuardedRouter } from '@/lib/useGuardedRouter';
@@ -50,7 +51,7 @@ export default function TopScreen() {
         </View>
 
         {isLoading ? (
-          <ActivityIndicator color={colors.accent} style={{ marginTop: spacing.xl }} />
+          <GridSkeleton width={cardWidth} columns={COLS} />
         ) : isError ? (
           <View style={styles.center}>
             <Text style={styles.errText}>

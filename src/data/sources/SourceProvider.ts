@@ -1,4 +1,5 @@
 import type {
+  CallOptions,
   Chapter,
   ChapterPage,
   MangaDetails,
@@ -18,12 +19,22 @@ export interface SourceProvider {
   type: 'official_api' | 'scraper' | 'user_files' | 'external_link';
   supportsSearch: boolean;
   supportsReading: boolean;
+  /**
+   * True when an EMPTY getChapters() result can be trusted as "this title has no
+   * readable chapters here" (a JSON API answering with an empty list). HTML
+   * scrapers leave it unset: zero parsed chapters is just as likely a changed
+   * page layout or an error page served with HTTP 200, and must never get the
+   * title hidden as dead.
+   */
+  trustEmptyChapters?: boolean;
 
+  // A layout the parser doesn't recognise, or an error page served with 200,
+  // must throw (UnexpectedPageError), never come back as an empty result.
   trending(options?: SearchOptions): Promise<MangaSearchResult[]>;
   search(query: string, options?: SearchOptions): Promise<MangaSearchResult[]>;
-  getMangaDetails(externalId: string): Promise<MangaDetails>;
-  getChapters(externalId: string, lang?: string): Promise<Chapter[]>;
-  getChapterPages(chapterId: string): Promise<ChapterPage[]>;
+  getMangaDetails(externalId: string, options?: CallOptions): Promise<MangaDetails>;
+  getChapters(externalId: string, lang?: string, options?: CallOptions): Promise<Chapter[]>;
+  getChapterPages(chapterId: string, options?: CallOptions): Promise<ChapterPage[]>;
 
   /**
    * Optional: real genre/tag browse (not a title search). The `genre` string is

@@ -1,10 +1,13 @@
-import { useQueryClient } from '@tanstack/react-query';
+import { Ionicons } from '@expo/vector-icons';
+import { Paths } from 'expo-file-system';
+import { BottomSheet } from '@/components/BottomSheet';
 import { useEffect, useState } from 'react';
 import Constants from 'expo-constants';
 import { Image } from 'expo-image';
 import { Stack, useRouter } from 'expo-router';
 import {
   Alert,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -15,9 +18,15 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { languageLabel } from '@/components/languages';
-import { clearLibrary, clearReadingProgress } from '@/data/local/db';
 import { fmtBytes } from '@/lib/format';
-import { useDeleteDownload, useDownloadsSize, useSourcesQuery } from '@/data/queries';
+import {
+  useClearLibrary,
+  useClearReadingProgress,
+  useDeleteDownload,
+  useDownloadsSize,
+  useDownloadedManga,
+  useSourcesQuery,
+} from '@/data/queries';
 import { registerChapterCheck, unregisterChapterCheck } from '@/lib/backgroundUpdates';
 import { checkForNewChapters } from '@/lib/chapterCheck';
 import { ensureNotificationPermission, setupAndroidChannel } from '@/lib/notifications';
@@ -32,8 +41,9 @@ import { useSettings } from '@/store/settings.store';
 import { colors, radius, spacing } from '@/theme/colors';
 import { typography } from '@/theme/typography';
 
-export default function SettingsScreen() {
-  const qc = useQueryClient();
+export default function SettingsScreen() { return <SettingsContent />; }
+
+export function SettingsContent({ tab = false }: { tab?: boolean }) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const reader = useReaderSettings();
@@ -41,6 +51,27 @@ export default function SettingsScreen() {
   const sources = useSourcesQuery();
   const downloadsSize = useDownloadsSize();
   const deleteDownload = useDeleteDownload();
+  const savedTitles = useDownloadedManga();
+  const [sheet, selectSheet] = useState<'mode' | 'direction' | 'gap' | 'languages' | 'sources' | 'data' | 'about' | null>(null);
+  const [sheetVisible, setSheetVisible] = useState(false);
+  const setSheet = (next: typeof sheet) => {
+    // Keep content in place while the sheet animates closed.
+    if (next !== null) selectSheet(next);
+    setSheetVisible(next !== null);
+  };
+  const [freeSpace, setFreeSpace] = useState<number | null>(null);
+  useEffect(() => {
+    if (Platform.OS === 'web') return;
+    try {
+      const bytes = Paths.availableDiskSpace;
+      if (typeof bytes === 'number' && Number.isFinite(bytes)) setFreeSpace(bytes);
+    } catch { /* Storage details are optional on unsupported platforms. */ }
+  }, [downloadsSize.data]);
+  const modeLabel = reader.mode === 'vertical' ? 'Vertical' : 'Paged';
+  const directionLabel = reader.direction === 'ltr' ? 'Left to right' : 'Right to left';
+  const gapLabel = reader.pageGap === 0 ? 'None' : reader.pageGap <= 8 ? 'Small' : 'Large';
+  const clearProgress = useClearReadingProgress();
+  const clearLib = useClearLibrary();
   // When the OS last actually ran the background chapter check.
   const [lastRun, setLastRun] = useState<number | null>(null);
   useEffect(() => {
@@ -62,6 +93,37 @@ export default function SettingsScreen() {
   const enabledCount = sourcesForLangs.filter(
     (s) => isSourceUsable(s, enabledLanguages, hiddenSources),
   ).length;
+
+  // Turning off the last language / last source would leave Home, search and
+  // the source picker with nothing valid — and the old selection kept loading.
+  const onToggleLanguage = (code: string) => {
+    if (enabledLanguages.length === 1 && enabledLanguages.includes(code)) {
+      Alert.alert('Keep one language', 'At least one content language has to stay on.');
+      return;
+    }
+    const nextLangs = enabledLanguages.includes(code)
+      ? enabledLanguages.filter((l) => l !== code)
+      : [...enabledLanguages, code];
+    const stillUsable = (sources.data ?? []).some((s) => isSourceUsable(s, nextLangs, hiddenSources));
+    if (!stillUsable) {
+      Alert.alert('No source left', 'Every source for the remaining languages is turned off below.');
+      return;
+    }
+    toggleLanguage(code);
+  };
+
+  const onToggleSource = (id: string) => {
+    if (!hiddenSources.includes(id)) {
+      const others = (sources.data ?? []).filter(
+        (s) => s.id !== id && isSourceUsable(s, enabledLanguages, hiddenSources),
+      );
+      if (others.length === 0) {
+        Alert.alert('Keep one source', 'At least one source has to stay on.');
+        return;
+      }
+    }
+    toggleHidden(id);
+  };
 
   const confirm = (title: string, message: string, onYes: () => void) =>
     Alert.alert(title, message, [
@@ -127,110 +189,42 @@ export default function SettingsScreen() {
     );
   };
 
-  return (
-    <>
-      <Stack.Screen options={{ title: 'Settings' }} />
-      <ScrollView
-        style={styles.screen}
-        contentContainerStyle={{ paddingTop: spacing.lg, paddingBottom: insets.bottom + spacing.xl }}
-      >
-        {/* ---------- Reading ---------- */}
-        <Section title="Reading">
-          <View style={styles.rowCol}>
-            <Text style={styles.rowLabel}>Default reading mode</Text>
-            <Segment
-              options={[
-                { value: 'vertical', label: '↕ Vertical' },
-                { value: 'paged', label: '↔ Paged' },
-              ]}
-              value={reader.mode}
-              onChange={(v) => reader.setMode(v as typeof reader.mode)}
-            />
-          </View>
-          {reader.mode === 'paged' && (
-            <View style={styles.rowCol}>
-              <Text style={styles.rowLabel}>Page direction</Text>
-              <Segment
-                options={[
-                  { value: 'ltr', label: 'L → R' },
-                  { value: 'rtl', label: 'R → L' },
-                ]}
-                value={reader.direction}
-                onChange={(v) => reader.setDirection(v as typeof reader.direction)}
-              />
-            </View>
-          )}
-          <ToggleRow
-            label="Keep screen on while reading"
-            value={reader.keepAwake}
-            onChange={reader.setKeepAwake}
-          />
-        </Section>
-
-        {/* ---------- Notifications ---------- */}
-        <Section title="Notifications">
-          <ToggleRow
-            label="New chapter notifications"
-            value={notifyChapters}
-            onChange={onToggleNotify}
-          />
-          <ActionRow label="Check for updates now" onPress={onCheckNow} />
-          {notifyChapters && (
-            <Text style={styles.note}>
-              {lastRun
-                ? `Background check last ran ${timeAgo(lastRun)}.`
-                : 'Waiting for the first background check.'}
-              {'\n'}Android decides when background checks run (usually every few hours). For
-              faster alerts, exclude MangaApp from battery optimization in your system settings.
-            </Text>
-          )}
-        </Section>
-
-        {/* ---------- Content languages ---------- */}
-        <Section title="Content languages">
-          {langs.map((code) => (
-            <ToggleRow
-              key={code}
-              label={languageLabel(code)}
-              value={enabledLanguages.includes(code)}
-              onChange={() => toggleLanguage(code)}
-            />
-          ))}
-        </Section>
-
-        {/* ---------- Sources (only for enabled languages) ---------- */}
-        <Section title="Sources">
-          {sourcesForLangs.length === 0 ? (
-            <Text style={styles.sourcesEmpty}>Enable a content language above to see sources.</Text>
-          ) : (
-            sourcesForLangs.map((s) => (
-              <View key={s.id} style={styles.row}>
-                <View style={styles.sourceRowLeft}>
-                  <View style={[styles.dot, { backgroundColor: sourceMeta(s.id).color }]} />
-                  <View>
-                    <Text style={styles.rowLabelInline}>{s.name}</Text>
-                    <Text style={styles.sourceLangs}>
-                      {s.languages.slice(0, 4).map(languageLabel).join(', ')}
-                    </Text>
-                  </View>
-                </View>
-                <Switch
-                  value={!hiddenSources.includes(s.id)}
-                  onValueChange={() => toggleHidden(s.id)}
-                  trackColor={{ true: colors.accent, false: colors.border }}
-                  thumbColor="#fff"
-                />
-              </View>
-            ))
-          )}
-          <ActionRow
-            label="Source diagnostics"
-            value={`${enabledCount} on`}
-            onPress={() => router.push('/diagnostics')}
-          />
-        </Section>
-
-        {/* ---------- Data ---------- */}
+  return <>
+    {!tab && <Stack.Screen options={{ headerShown: false }} />}
+    <ScrollView style={styles.screen} contentContainerStyle={{ paddingTop: insets.top + 16, paddingBottom: insets.bottom + 24 }}>
+      <View style={styles.heading}>{!tab && <Pressable accessibilityLabel="Go back" onPress={() => router.back()} style={styles.backButton}><Ionicons name="chevron-back" size={24} color={colors.text} /></Pressable>}<Text style={styles.headingText}>Settings</Text></View>
+      <Pressable style={styles.preview} onPress={() => setSheet('mode')}>
+        <View style={styles.previewBook}><View style={styles.previewPage} /><View style={[styles.previewPage, { backgroundColor: '#542A32' }]} /></View>
+        <View style={{ flex: 1, gap: 5 }}><Text style={styles.previewTitle}>Your reading setup</Text><Text style={styles.previewCaption}>{modeLabel}{reader.mode === 'paged' ? ' · ' + directionLabel : ''} · {gapLabel.toLowerCase()} gap</Text></View><Ionicons name="chevron-forward" size={19} color={colors.textMuted} />
+      </Pressable>
+      <Section title="Reading">
+        <ActionRow icon="book-outline" label="Reading mode" value={modeLabel} onPress={() => setSheet('mode')} />
+        <ActionRow icon="arrow-forward-outline" label="Page direction" value={directionLabel} disabled={reader.mode === 'vertical'} onPress={() => setSheet('direction')} />
+        <ActionRow icon="resize-outline" label="Page gap" value={gapLabel} onPress={() => setSheet('gap')} />
+        <ToggleRow icon="eye-outline" label="Keep screen awake" value={reader.keepAwake} onChange={reader.setKeepAwake} />
+      </Section>
+      <Section title="Content">
+        <ActionRow icon="globe-outline" label="Languages" value={enabledLanguages.map(languageLabel).join(', ')} onPress={() => setSheet('languages')} />
+        <ActionRow icon="layers-outline" label="Sources" value={enabledCount + ' enabled · ' + hiddenSources.length + ' hidden'} onPress={() => setSheet('sources')} />
+        <ToggleRow icon="notifications-outline" label="New chapter alerts" value={notifyChapters} onChange={onToggleNotify} />
+        <Text style={styles.note}>Library titles · checked in the background{lastRun ? ' · last ran ' + timeAgo(lastRun) : ''}</Text>
+        <ActionRow icon="refresh-outline" label="Check for updates now" onPress={onCheckNow} />
+      </Section>
+      <Section title="Storage">
+        <View style={styles.storageHeader}><Ionicons name="download-outline" size={22} color={colors.textMuted} /><View style={{ flex: 1, gap: 4 }}><Text style={styles.rowLabelInline}>Downloads</Text><Text style={styles.sourceLangs}>{(savedTitles.data ?? []).reduce((n, m) => n + m.chapters, 0)} chapters · {savedTitles.data?.length ?? 0} titles</Text></View><Text style={styles.storageSize}>{fmtBytes(downloadsSize.data ?? 0)}</Text></View>
+        {freeSpace !== null && <View style={styles.storageTrack}><View style={[styles.storageFill, { width: (((downloadsSize.data ?? 0) / Math.max(1, freeSpace + (downloadsSize.data ?? 0)) * 100) + '%') as `${number}%` }]} /></View>}
+        <View style={styles.storageFooter}><Text style={styles.sourceLangs}>{freeSpace !== null ? fmtBytes(freeSpace) + ' free on this phone' : 'Saved on this device'}</Text><Pressable style={styles.manageButton} onPress={() => router.push({ pathname: '/library', params: { category: 'downloads' } })}><Text style={styles.manageText}>Manage</Text><Ionicons name="chevron-forward" size={16} color={colors.accent} /></Pressable></View>
+      </Section>
+      <Section title="More"><ActionRow icon="server-outline" label="Data & storage tools" onPress={() => setSheet('data')} /><ActionRow icon="information-circle-outline" label="About MangaApp" value={'v' + (Constants.expoConfig?.version ?? '1.0.0')} onPress={() => setSheet('about')} /></Section>
+    </ScrollView>
+    <BottomSheet visible={sheetVisible} title={sheet === 'mode' ? 'Reading mode' : sheet === 'direction' ? 'Page direction' : sheet === 'gap' ? 'Page gap' : sheet === 'languages' ? 'Content languages' : sheet === 'sources' ? 'Sources' : sheet === 'data' ? 'Data & storage' : 'About MangaApp'} onClose={() => setSheet(null)}>
+      <ScrollView style={{ maxHeight: 460 }}>
+        {sheet === 'mode' && <Segment options={[{ value: 'vertical', label: 'Vertical' }, { value: 'paged', label: 'Paged' }]} value={reader.mode} onChange={v => { reader.setMode(v); setSheet(null); }} />}
+        {sheet === 'direction' && <Segment options={[{ value: 'ltr', label: 'Left to right' }, { value: 'rtl', label: 'Right to left' }]} value={reader.direction} onChange={v => { reader.setDirection(v); setSheet(null); }} />}
+        {sheet === 'gap' && <Segment options={[{ value: '0', label: 'None' }, { value: '8', label: 'Small' }, { value: '16', label: 'Large' }]} value={String(reader.pageGap)} onChange={v => { reader.setPageGap(Number(v)); setSheet(null); }} />}
+        {sheet === 'languages' && langs.map(code => <ToggleRow key={code} label={languageLabel(code)} value={enabledLanguages.includes(code)} onChange={() => onToggleLanguage(code)} />)}
+        {sheet === 'sources' && <>{sourcesForLangs.map(source => <View key={source.id} style={styles.row}><View style={styles.sourceRowLeft}><View style={[styles.dot, { backgroundColor: sourceMeta(source.id).color }]} /><View><Text style={styles.rowLabelInline}>{source.name}</Text><Text style={styles.sourceLangs}>{source.languages.filter(l => enabledLanguages.includes(l)).map(languageLabel).join(', ')}</Text></View></View><Switch accessibilityLabel={source.name} value={!hiddenSources.includes(source.id)} onValueChange={() => onToggleSource(source.id)} trackColor={{ true: colors.accent, false: colors.border }} thumbColor={hiddenSources.includes(source.id) ? colors.textMuted : '#241006'} /></View>)}<ActionRow label="Browse sources" onPress={() => { setSheet(null); router.push('/sources'); }} /><ActionRow label="Source diagnostics" onPress={() => { setSheet(null); router.push('/diagnostics'); }} /></>}
+        {sheet === 'data' && <>        {/* ---------- Data ---------- */}
         <Section title="Data">
           <ActionRow
             label="Clear search history"
@@ -251,7 +245,10 @@ export default function SettingsScreen() {
             danger
             onPress={() =>
               confirm('Clear downloads?', 'All chapters saved for offline reading will be removed.', () =>
-                deleteDownload.all.mutate(),
+                deleteDownload.all.mutate(undefined, {
+                  onError: () =>
+                    Alert.alert('Couldn’t clear downloads', 'Some files couldn’t be removed. Try again.'),
+                }),
               )
             }
           />
@@ -259,26 +256,24 @@ export default function SettingsScreen() {
             label="Clear reading progress"
             danger
             onPress={() =>
-              confirm('Clear reading progress?', 'Continue Reading and all positions will be removed.', async () => {
-                await clearReadingProgress();
-                qc.invalidateQueries({ queryKey: ['continue-reading'] });
-                qc.invalidateQueries({ queryKey: ['library'] });
-              })
+              confirm('Clear reading progress?', 'Continue Reading and all positions will be removed.', () =>
+                clearProgress.mutate(),
+              )
             }
           />
           <ActionRow
             label="Clear library"
             danger
             onPress={() =>
-              confirm('Clear library?', 'All saved titles and favourites will be removed.', async () => {
-                await clearLibrary();
-                qc.invalidateQueries({ queryKey: ['library'] });
-              })
+              confirm('Clear library?', 'All saved titles and favourites will be removed.', () =>
+                clearLib.mutate(),
+              )
             }
           />
         </Section>
 
-        {/* ---------- About ---------- */}
+</>}
+        {sheet === 'about' && <>        {/* ---------- About ---------- */}
         <Section title="About">
           <View style={styles.aboutHead}>
             <Text style={styles.appName}>MangaApp</Text>
@@ -297,9 +292,11 @@ export default function SettingsScreen() {
             A multi-source manga reader. Legal/official APIs only. Built as a portfolio project.
           </Text>
         </Section>
+</>}
       </ScrollView>
-    </>
-  );
+    </BottomSheet>
+  </>;
+
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
@@ -312,28 +309,34 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 function ToggleRow({
+  icon,
   label,
   value,
   onChange,
 }: {
   label: string;
+  icon?: keyof typeof Ionicons.glyphMap;
   value: boolean;
   onChange: (v: boolean) => void;
 }) {
   return (
     <View style={styles.row}>
-      <Text style={styles.rowLabelInline}>{label}</Text>
+      <View style={styles.settingLabel}>{icon && <Ionicons name={icon} size={21} color={colors.textMuted} />}<Text style={[styles.rowLabelInline, { flexShrink: 1 }]}>{label}</Text></View>
       <Switch
         value={value}
         onValueChange={onChange}
         trackColor={{ true: colors.accent, false: colors.border }}
-        thumbColor="#fff"
+        {...(Platform.OS === 'web' ? { activeThumbColor: '#241006', activeTrackColor: colors.accent } : {})}
+        accessibilityLabel={label}
+        thumbColor={value ? '#241006' : colors.textMuted}
       />
     </View>
   );
 }
 
 function ActionRow({
+  icon,
+  disabled,
   label,
   value,
   danger,
@@ -342,13 +345,15 @@ function ActionRow({
   label: string;
   value?: string;
   danger?: boolean;
+  disabled?: boolean;
+  icon?: keyof typeof Ionicons.glyphMap;
   onPress: () => void;
 }) {
   return (
-    <Pressable style={({ pressed }) => [styles.row, pressed && styles.rowPressed]} onPress={onPress}>
-      <Text style={[styles.rowLabelInline, danger && { color: colors.danger }]}>{label}</Text>
+    <Pressable accessibilityRole="button" disabled={disabled} style={({ pressed }) => [styles.row, pressed && styles.rowPressed, disabled && { opacity: 0.4 }]} onPress={onPress}>
+      <View style={styles.settingLabel}>{icon && <Ionicons name={icon} size={21} color={colors.textMuted} />}<Text style={[styles.rowLabelInline, { flexShrink: 1 }, danger && { color: colors.danger }]}>{label}</Text></View>
       <View style={styles.rowRight}>
-        {value ? <Text style={styles.rowValue}>{value}</Text> : null}
+        {value ? <Text numberOfLines={2} style={styles.rowValue}>{value}</Text> : null}
         <Text style={styles.chevron}>›</Text>
       </View>
     </Pressable>
@@ -383,22 +388,39 @@ function Segment<T extends string>({
 }
 
 const styles = StyleSheet.create({
+  heading: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, marginBottom: 22, gap: 8 },
+  headingText: { fontSize: 30, fontWeight: '700', letterSpacing: -0.5, color: colors.text },
+  backButton: { width: 36, height: 44, justifyContent: 'center' },
+  preview: { marginHorizontal: 16, padding: 16, borderRadius: 20, flexDirection: 'row', alignItems: 'center', gap: 16, backgroundColor: colors.card, marginBottom: 24 },
+  previewBook: { width: 52, height: 68, borderRadius: 7, borderWidth: 4, borderColor: '#E4DEF5', gap: 4, padding: 2 },
+  previewPage: { flex: 1, backgroundColor: '#383050', borderRadius: 2 },
+  previewTitle: { ...typography.bodyStrong, color: colors.text },
+  previewCaption: { ...typography.caption, color: colors.textMuted, lineHeight: 19 },
+  settingLabel: { flexDirection: 'row', alignItems: 'center', gap: 12, flex: 1, minWidth: 0 },
+  storageHeader: { flexDirection: 'row', alignItems: 'center', padding: 16, gap: 12 },
+  storageSize: { ...typography.bodyStrong, color: colors.text },
+  storageTrack: { height: 5, borderRadius: 3, marginHorizontal: 16, backgroundColor: colors.border, overflow: 'hidden' },
+  storageFill: { height: '100%', backgroundColor: colors.accent },
+  storageFooter: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 8 },
+  manageButton: { flexDirection: 'row', alignItems: 'center', gap: 5, minHeight: 40 },
+  manageText: { ...typography.caption, fontWeight: '700', color: colors.accent },
   screen: { flex: 1, backgroundColor: colors.bg },
   section: { marginBottom: spacing.xl },
   sectionTitle: {
     ...typography.caption,
-    color: colors.textFaint,
+    color: colors.textMuted, letterSpacing: 1,
     textTransform: 'uppercase',
     paddingHorizontal: spacing.lg,
     marginBottom: spacing.sm,
   },
   card: {
-    backgroundColor: colors.card,
+    backgroundColor: colors.bgElevated, borderWidth: 1, borderColor: colors.border,
     marginHorizontal: spacing.lg,
     borderRadius: radius.lg,
     overflow: 'hidden',
   },
   row: {
+    minHeight: 56,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
@@ -408,20 +430,11 @@ const styles = StyleSheet.create({
     borderBottomColor: colors.border,
   },
   rowPressed: { backgroundColor: colors.cardPressed },
-  rowCol: {
-    paddingVertical: spacing.md,
-    paddingHorizontal: spacing.lg,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.border,
-    gap: spacing.sm,
-  },
-  rowLabel: { ...typography.caption, color: colors.textMuted, textTransform: 'uppercase' },
   sourceRowLeft: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
   sourceLangs: { ...typography.caption, color: colors.textFaint, marginTop: 1 },
-  sourcesEmpty: { ...typography.caption, color: colors.textMuted, padding: spacing.lg },
   rowLabelInline: { ...typography.body, color: colors.text },
-  rowRight: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
-  rowValue: { ...typography.body, color: colors.textMuted },
+  rowRight: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, maxWidth: '47%', marginLeft: 8, flexShrink: 1 },
+  rowValue: { ...typography.caption, color: colors.textMuted, flexShrink: 1, textAlign: 'right' },
   chevron: { color: colors.textFaint, fontSize: 20 },
 
   segment: { flexDirection: 'row', backgroundColor: colors.bgElevated, borderRadius: radius.pill, padding: 3, gap: 3 },

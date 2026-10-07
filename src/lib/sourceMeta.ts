@@ -4,7 +4,6 @@ export const SOURCE_META: Record<string, { name: string; color: string }> = {
   mangapill: { name: 'Mangapill', color: '#E5B53A' },
   mangalib: { name: 'MangaLib', color: '#7C5CFC' },
   remanga: { name: 'Remanga', color: '#3FB97A' },
-  mangabuff: { name: 'Mangabuff', color: '#1FB6C9' },
   webtoon: { name: 'WEBTOON', color: '#00D564' },
   asura: { name: 'Asura Scans', color: '#913FE2' },
   mangakatana: { name: 'MangaKatana', color: '#E04E5E' },

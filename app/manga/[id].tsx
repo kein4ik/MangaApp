@@ -1,3 +1,4 @@
+import { CoverArt } from '@/components/CoverArt';
 import { Ionicons } from '@expo/vector-icons';
 import { FlashList } from '@shopify/flash-list';
 import { useQueryClient } from '@tanstack/react-query';
@@ -22,10 +23,12 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import {
+  useCachedMangaDetails,
   useChapters,
   useCrossSourceProgress,
   useLibraryStatus,
   useMangaDetails,
+  useOfflineChapters,
   useDeadChapters,
   useMangaProgress,
   useMarkChaptersRead,
@@ -45,12 +48,16 @@ import {
   useToggleLibrary,
 } from '@/data/queries';
 import { linkWork, normChapterNumber, setWorkPref, type LibraryStatus } from '@/data/local/db';
+import { HttpError } from '@/data/sources/http';
+import { SourceRegistry } from '@/data/sources/registry';
 import type { Chapter } from '@/data/sources/types';
+import { chapterNeighbours } from '@/lib/chapters';
 import { isWorkDead } from '@/lib/sourceFilter';
 import { languageLabel } from '@/components/languages';
 import { BottomSheet } from '@/components/BottomSheet';
 import { MangaCard } from '@/components/MangaCard';
 import { sourceMeta } from '@/lib/sourceMeta';
+import { hapticSuccess, hapticTap } from '@/lib/haptics';
 import { useGuardedRouter } from '@/lib/useGuardedRouter';
 import { downloadKey, useDownloadProgress } from '@/store/downloads.store';
 import { useSettings } from '@/store/settings.store';
@@ -80,9 +87,19 @@ export default function MangaDetailsScreen() {
   // but can be switched in place to any other source the work lives on.
   const [sourceId, setSourceId] = useState(routeSourceId);
   const [id, setId] = useState(routeId);
-  const [lang, setLang] = useState(language);
+  // Start in a language THIS source serves (an English-only source opened
+  // while the app language is Russian used to be labelled/saved as "ru").
+  const [lang, setLang] = useState(() => {
+    const served = SourceRegistry.get(routeSourceId)?.languages ?? [];
+    if (served.length === 0 || served.includes(language)) return language;
+    return served.find((l) => enabledLanguages.includes(l)) ?? served[0];
+  });
 
   const details = useMangaDetails(sourceId, id);
+  // Offline and nothing cached in memory: fall back to the title as stored on
+  // the device, so downloaded chapters stay reachable without network.
+  const cachedDetails = useCachedMangaDetails(sourceId, id, details.isError && !details.data);
+  const manga = details.data ?? cachedDetails.data ?? undefined;
   const sources = useSourcesQuery();
   const source = sources.data?.find((s) => s.id === sourceId);
   const canRead = source?.supportsReading ?? true;
@@ -91,15 +108,19 @@ export default function MangaDetailsScreen() {
 
   // Only fetch chapters from sources that can actually serve readable pages.
   const chapters = useChapters(sourceId, id, lang);
+  // Chapter list failed (offline / source down) → show what's downloaded.
+  const offlineChapters = useOfflineChapters(sourceId, id, chapters.isError && !chapters.data);
+  const chapterList: Chapter[] | undefined = chapters.data ?? offlineChapters.data;
+  const showingOffline = !chapters.data && !!offlineChapters.data?.length;
   const progress = useMangaProgress(sourceId, id);
 
   const mangaRef = {
     sourceId,
     externalId: id,
-    title: details.data?.title ?? '',
-    coverUrl: details.data?.coverUrl,
-    description: details.data?.description,
-    languages: details.data?.languages ?? [],
+    title: manga?.title ?? '',
+    coverUrl: manga?.coverUrl,
+    description: manga?.description,
+    languages: manga?.languages ?? [],
   };
   const toggleLibrary = useToggleLibrary(mangaRef);
   const libStatus = useLibraryStatus(sourceId, id);
@@ -131,6 +152,9 @@ export default function MangaDetailsScreen() {
     lang,
   );
   const [statusOpen, setStatusOpen] = useState(false);
+  const [sourceOpen, setSourceOpen] = useState(false);
+  const [languageOpen, setLanguageOpen] = useState(false);
+  const [descriptionOpen, setDescriptionOpen] = useState(false);
 
   // The full set of sources this work is available on (route entry + every
   // match found from whichever source is active), accumulated and de-duped so
@@ -228,9 +252,31 @@ export default function MangaDetailsScreen() {
     if (p.language && p.language !== lang) setLang(p.language);
   }, [pref.data, sourceId, id, lang]);
 
-  // Active source loaded but empty (often a licensed title) → find a source that
-  // actually has chapters, so we can offer it instead of a dead end.
-  const activeEmpty = canRead && !chapters.isLoading && (chapters.data?.length ?? 0) === 0;
+  // A saved preference can point at an entry that has since vanished (a title
+  // removed from that site) — that used to strand the page on "Couldn't load".
+  // Fall back to the source the user came from, and forget a preference that's
+  // gone for good (404/410) so the next open goes straight to a working one.
+  useEffect(() => {
+    if (!details.isError || details.data) return;
+    if (sourceId === routeSourceId && id === routeId) return;
+    const served = SourceRegistry.get(routeSourceId)?.languages ?? [];
+    const routeLang = served.includes(lang)
+      ? lang
+      : served.find((l) => enabledLanguages.includes(l)) ?? served[0] ?? lang;
+    setSourceId(routeSourceId);
+    setId(routeId);
+    setLang(routeLang);
+    const gone = details.error instanceof HttpError && [404, 410].includes(details.error.status);
+    if (gone) savePref(routeSourceId, routeId, routeLang);
+    // savePref is recreated each render; the ids/flags above are what matter.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [details.isError, details.data, details.error, sourceId, id, routeSourceId, routeId]);
+
+  // Active source empty (often a licensed title) or unreachable → find a source
+  // that actually has chapters, so we can offer it instead of a dead end.
+  const chaptersFailed = chapters.isError && !chapters.data;
+  const activeEmpty =
+    canRead && ((chapters.isSuccess && chapters.data.length === 0) || chaptersFailed);
   const fallback = useReadableFallback(variants, sourceId, id, activeEmpty);
 
   // "Read on" hides sources confirmed empty (no readable chapters), but always
@@ -251,7 +297,7 @@ export default function MangaDetailsScreen() {
   // `readNums` = chapter numbers read across the whole group (cross-source).
   const readChapters = useReadChapters(sourceId, id);
   const readNumbers = useReadChapterNumbers(sourceId, id);
-  const markRead = useMarkChaptersRead(sourceId, id);
+  const markRead = useMarkChaptersRead(sourceId, id, lang);
   const readSet = useMemo(() => new Set(readChapters.data ?? []), [readChapters.data]);
   const readNums = useMemo(() => new Set(readNumbers.data ?? []), [readNumbers.data]);
   const isChapterRead = (c: Chapter) =>
@@ -269,7 +315,7 @@ export default function MangaDetailsScreen() {
 
   // Long-press a chapter → mark everything up to and including it as read.
   const markUpTo = (chapter: Chapter) => {
-    const list = chapters.data ?? [];
+    const list = chapterList ?? [];
     const i = list.findIndex((c) => c.externalId === chapter.externalId);
     if (i < 0) return;
     const items = list
@@ -287,13 +333,16 @@ export default function MangaDetailsScreen() {
     );
   };
 
-  const lastChapterId = progress.data?.chapter_id;
+  // Where the user actually is: the chapter last OPENED in the reader. Chapters
+  // only marked read never count as "current" (that used to hijack Continue).
+  const lastOpened = progress.data?.opened_at ? progress.data : null;
+  const lastChapterId = lastOpened?.chapter_id;
 
   // Chapter filter + order — essential for long series (One Piece = 1000+).
   const [chapterQuery, setChapterQuery] = useState('');
-  const [newestFirst, setNewestFirst] = useState(false);
+  const [newestFirst, setNewestFirst] = useState(true);
   const displayedChapters = useMemo(() => {
-    let list = chapters.data ?? [];
+    let list = chapterList ?? [];
     const q = chapterQuery.trim().toLowerCase();
     if (q) {
       list = list.filter(
@@ -303,7 +352,7 @@ export default function MangaDetailsScreen() {
       );
     }
     return newestFirst ? [...list].reverse() : list;
-  }, [chapters.data, chapterQuery, newestFirst]);
+  }, [chapterList, chapterQuery, newestFirst]);
 
   // Cross-source resume: read elsewhere but not here → find the closest chapter.
   const crossResume = useMemo(() => {
@@ -324,16 +373,65 @@ export default function MangaDetailsScreen() {
   }, [lastChapterId, crossProgress.data, chapters.data]);
 
   const headerSubtitle = useMemo(() => {
-    if (!details.data) return '';
+    if (!manga) return '';
     const parts = [
-      details.data.authors?.[0],
-      details.data.year ? String(details.data.year) : undefined,
-      details.data.status,
+      manga.authors?.[0],
+      manga.year ? String(manga.year) : undefined,
+      manga.status,
     ].filter(Boolean);
     return parts.join(' · ');
-  }, [details.data]);
+  }, [manga]);
 
-  if (details.isLoading) {
+  // What the primary button opens:
+  // - mid-chapter → that chapter at the saved page (`resume`);
+  // - finished (or marked) the chapter you were on → the first UNREAD chapter
+  //   after it, not its last page again;
+  // - never opened anything → the first chapter after the furthest one marked read.
+  const readTarget = useMemo(() => {
+    const list = chapterList ?? [];
+    const firstUnreadAfter = (idx: number) => {
+      for (let i = idx + 1; i < list.length; i++) if (!isChapterRead(list[i])) return list[i];
+      return undefined;
+    };
+    if (lastOpened) {
+      if (lastOpened.read) {
+        const idx = list.findIndex((c) => c.externalId === lastOpened.chapter_id);
+        const next =
+          (idx >= 0 ? firstUnreadAfter(idx) : undefined) ??
+          chapterNeighbours(list, lastOpened.chapter_id).next;
+        if (next) {
+          return {
+            id: next.externalId,
+            number: next.chapterNumber,
+            page: 0,
+            lang: next.language || lang,
+            resume: false,
+          };
+        }
+      }
+      return {
+        id: lastOpened.chapter_id,
+        number: lastOpened.chapter_number ?? undefined,
+        page: lastOpened.page_index,
+        lang: lastOpened.language ?? lang,
+        resume: true,
+      };
+    }
+    let lastReadIdx = -1;
+    list.forEach((c, i) => {
+      if (isChapterRead(c)) lastReadIdx = i;
+    });
+    const target = list[lastReadIdx + 1] ?? list[lastReadIdx];
+    return target
+      ? { id: target.externalId, number: target.chapterNumber, page: 0, lang, resume: false }
+      : null;
+    // isChapterRead reads readSet/readNums, both listed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chapterList, lastOpened, lang, readSet, readNums]);
+
+  const fallingBack =
+    details.isError && !details.data && (sourceId !== routeSourceId || id !== routeId);
+  if (details.isLoading || fallingBack || (details.isError && cachedDetails.isLoading)) {
     return (
       <View style={styles.center}>
         <ActivityIndicator color={colors.accent} />
@@ -341,32 +439,26 @@ export default function MangaDetailsScreen() {
     );
   }
 
-  if (details.isError || !details.data) {
+  // Only a hard dead end when there's nothing at all to show — cached details
+  // survive a failed background refresh, and offline the device copy is used.
+  if (!manga) {
     return (
-      <View style={styles.center}>
+      <View style={[styles.center, { gap: spacing.md }]}>
         <Text style={styles.error}>Couldn’t load this title.</Text>
+        <Pressable style={styles.retryBtn} onPress={() => details.refetch()}>
+          <Text style={styles.retryBtnText}>Retry</Text>
+        </Pressable>
+        <Pressable onPress={() => router.back()} hitSlop={10}>
+          <Text style={styles.backLink}>Go back</Text>
+        </Pressable>
       </View>
     );
   }
 
-  const m = details.data;
-  const hasChapters = (chapters.data?.length ?? 0) > 0;
-  const readTarget = lastChapterId
-    ? {
-        id: lastChapterId,
-        number: progress.data?.chapter_number,
-        page: progress.data?.page_index,
-        lang: progress.data?.language ?? lang,
-      }
-    : hasChapters
-      ? {
-          id: chapters.data![0].externalId,
-          number: chapters.data![0].chapterNumber,
-          page: 0,
-          lang,
-        }
-      : null;
-  const progressPercent = Math.round((progress.data?.percent ?? 0) * 100);
+  const m = manga;
+  const resumeLabel =
+    lastOpened || readSet.size > 0 || readNums.size > 0 ? 'Continue Reading' : 'Start Reading';
+  const progressPercent = Math.round((lastOpened?.percent ?? 0) * 100);
 
   return (
     <>
@@ -423,54 +515,16 @@ export default function MangaDetailsScreen() {
                   </Pressable>
                 </View>
               </View>
-              {m.coverUrl && (
-                <Image source={imageSource(m.coverUrl)} style={styles.cover} contentFit="cover" />
-              )}
-              <Text style={styles.title}>{m.title}</Text>
-              {headerSubtitle ? <Text style={styles.subtitle}>{headerSubtitle}</Text> : null}
-              {m.genres && m.genres.length > 0 && (
-                genresBrowsable ? (
-                  <View style={styles.genreRow}>
-                    {m.genres.slice(0, 3).map((g) => (
-                      <Pressable
-                        key={g}
-                        style={styles.genrePill}
-                        onPress={() =>
-                          router.push({ pathname: '/browse', params: { genre: g } })
-                        }
-                      >
-                        <Text style={styles.genrePillText}>{g}</Text>
-                      </Pressable>
-                    ))}
-                  </View>
-                ) : (
-                  <Text numberOfLines={1} style={styles.genres}>
-                    {m.genres.slice(0, 3).join('  •  ')}
-                  </Text>
-                )
-              )}
-              <View style={styles.metaChips}>
-                <View style={styles.metaChip}>
-                  <View
-                    style={[styles.metaChipDot, { backgroundColor: sourceMeta(sourceId).color }]}
-                  />
-                  <Text style={styles.metaChipText}>{source?.name ?? sourceMeta(sourceId).name}</Text>
-                </View>
-                <View style={styles.metaChip}>
-                  <Ionicons name="globe-outline" size={14} color={colors.textMuted} />
-                  <Text style={styles.metaChipText}>{lang.toUpperCase()}</Text>
+              <View style={styles.titleOverview}>
+                <CoverArt uri={m.coverUrl} title={m.title} style={styles.cover} />
+                <View style={styles.titleInfo}>
+                  <Text style={styles.title}>{m.title}</Text>
+                  {headerSubtitle ? <Text style={styles.subtitle}>{headerSubtitle}</Text> : null}
+                  {!!m.genres?.length && <View style={styles.genreRow}>{m.genres.slice(0, 3).map(g => genresBrowsable ? <Pressable key={g} onPress={() => router.push({ pathname: '/browse', params: { genre: g } })}><Text style={styles.genrePillText}>{g}</Text></Pressable> : <Text key={g} style={styles.genrePillText}>{g}</Text>)}</View>}
+                  <Pressable style={styles.metaChip} onPress={() => setSourceOpen(true)} accessibilityLabel="Choose title source"><View style={[styles.metaChipDot, { backgroundColor: sourceMeta(sourceId).color }]} /><Text numberOfLines={1} style={styles.metaChipText}>{source?.name ?? sourceMeta(sourceId).name} · {lang.toUpperCase()}</Text><Ionicons name="chevron-down" size={13} color={colors.textMuted} /></Pressable>
+                  {displayVariants.length > 1 && <Pressable onPress={() => setSourceOpen(true)} style={styles.alsoOnButton}><Text style={styles.alsoOn} numberOfLines={2}>Also on <Text style={{ color: colors.text }}>{displayVariants.filter(v => v.sourceId !== sourceId || v.externalId !== id).map(v => sourceMeta(v.sourceId).name).join(' · ')}</Text></Text></Pressable>}
                 </View>
               </View>
-              {canRead && readTarget ? (
-                <View style={styles.readProgressMeta}>
-                  <Text style={styles.readProgressTitle}>
-                    {readTarget.number ? `Chapter ${readTarget.number}` : 'Ready to read'}
-                  </Text>
-                  {lastChapterId ? (
-                    <Text style={styles.readProgressCaption}>{progressPercent}% read</Text>
-                  ) : null}
-                </View>
-              ) : null}
             </View>
 
             <View style={styles.actions}>
@@ -499,27 +553,16 @@ export default function MangaDetailsScreen() {
                     color={readTarget ? '#1A0E06' : colors.textFaint}
                   />
                   <Text style={[styles.primaryBtnText, !readTarget && styles.primaryBtnTextDisabled]}>
-                    {lastChapterId
-                      ? 'Continue Reading'
-                      : hasChapters
-                        ? 'Start Reading'
+                    {readTarget
+                      ? (readTarget.resume ? 'Continue' : resumeLabel === 'Start Reading' ? 'Start reading' : 'Continue') + (readTarget.number ? ' · Ch. ' + readTarget.number : '') + (readTarget.resume && readTarget.page ? ', p. ' + (readTarget.page + 1) : '')
+                      : chapters.isLoading
+                        ? 'Loading chapters…'
                         : 'No chapters'}
                   </Text>
                 </Pressable>
               )}
               <View style={styles.secondaryActions}>
-                <Pressable
-                  style={styles.secondaryBtn}
-                  onPress={() => toggleFavorite.mutate(!libStatus.data?.favorite)}
-                >
-                  <Ionicons
-                    name={libStatus.data?.favorite ? 'heart' : 'heart-outline'}
-                    size={19}
-                    color={libStatus.data?.favorite ? colors.accent : colors.textMuted}
-                  />
-                  <Text style={styles.secondaryBtnText}>Favorite</Text>
-                </Pressable>
-                <Pressable style={styles.secondaryBtn} onPress={() => setStatusOpen(true)}>
+                <Pressable style={styles.secondaryBtn} onPress={() => setStatusOpen(true)} accessibilityRole="button" accessibilityLabel="Choose library status">
                   <Ionicons
                     name={libStatus.data?.inLibrary ? 'bookmark' : 'bookmark-outline'}
                     size={18}
@@ -529,7 +572,7 @@ export default function MangaDetailsScreen() {
                     {libStatus.data?.inLibrary
                       ? STATUS_LABELS[(libStatus.data.status as LibraryStatus) ?? 'reading'] ??
                         'In Library'
-                      : 'Add to Library'}
+                      : 'Save'}
                   </Text>
                   <Ionicons name="chevron-down" size={14} color={colors.textFaint} />
                 </Pressable>
@@ -563,7 +606,9 @@ export default function MangaDetailsScreen() {
                 }
               >
                 <Text style={styles.crossBannerText}>
-                  No readable chapters on {source?.name ?? sourceId}
+                  {chaptersFailed
+                    ? `Couldn’t reach ${source?.name ?? sourceId}`
+                    : `No readable chapters on ${source?.name ?? sourceId}`}
                 </Text>
                 <Text style={styles.crossBannerCta}>
                   Read on {sourceMeta(fallback.data.sourceId).name} ({fallback.data.count} chapters) ›
@@ -571,67 +616,9 @@ export default function MangaDetailsScreen() {
               </Pressable>
             )}
 
-            {(displayVariants.length > 1 || sourceLangs.length > 1) && (
-              <View style={styles.availWrap}>
-                {displayVariants.length > 1 && (
-                  <>
-                    <Text style={styles.availTitle}>Read on</Text>
-                    <View style={styles.switchRow}>
-                      {displayVariants.map((v) => {
-                        const activeSrc = v.sourceId === sourceId && v.externalId === id;
-                        const meta = sourceMeta(v.sourceId);
-                        const name =
-                          sources.data?.find((s) => s.id === v.sourceId)?.name ?? meta.name;
-                        return (
-                          <Pressable
-                            key={`${v.sourceId}:${v.externalId}`}
-                            style={[styles.switchChip, activeSrc && styles.switchChipActive]}
-                            onPress={() => switchSource(v)}
-                          >
-                            <View style={[styles.availDot, { backgroundColor: meta.color }]} />
-                            <Text
-                              style={[styles.switchText, activeSrc && { color: colors.accent }]}
-                            >
-                              {name}
-                            </Text>
-                            {activeSrc && (
-                              <Ionicons name="checkmark" size={14} color={colors.accent} />
-                            )}
-                          </Pressable>
-                        );
-                      })}
-                    </View>
-                  </>
-                )}
-
-                {sourceLangs.length > 1 && (
-                  <>
-                    <Text style={[styles.availTitle, { marginTop: spacing.md }]}>Language</Text>
-                    <View style={styles.switchRow}>
-                      {sourceLangs.map((code) => {
-                        const activeLang = code === lang;
-                        return (
-                          <Pressable
-                            key={code}
-                            style={[styles.switchChip, activeLang && styles.switchChipActive]}
-                            onPress={() => pickLang(code)}
-                          >
-                            <Text
-                              style={[styles.switchText, activeLang && { color: colors.accent }]}
-                            >
-                              {languageLabel(code)}
-                            </Text>
-                          </Pressable>
-                        );
-                      })}
-                    </View>
-                  </>
-                )}
-              </View>
-            )}
 
             {cleanDescription(m.description) ? (
-              <Text style={styles.description}>{cleanDescription(m.description)}</Text>
+              <View><Text numberOfLines={descriptionOpen ? undefined : 3} style={styles.description}>{cleanDescription(m.description)}</Text><Pressable onPress={() => setDescriptionOpen(v => !v)} style={styles.descriptionToggle}><Text style={styles.descriptionToggleText}>{descriptionOpen ? 'Less' : 'More'}</Text></Pressable></View>
             ) : null}
 
             {crossResume && (
@@ -663,10 +650,30 @@ export default function MangaDetailsScreen() {
 
             {canRead && (
               <>
-                <Text style={styles.chaptersHeading}>
-                  Chapters {chapters.data ? `(${chapters.data.length})` : ''}
-                </Text>
-                {chapters.data && chapters.data.length > 0 && (
+                <View style={styles.chapterHeadingRow}><Text style={styles.chaptersHeading}>Chapters <Text style={styles.chapterCount}>{chapterList?.length ?? ''}</Text></Text><Pressable onPress={() => setLanguageOpen(true)} style={styles.languageChip}><Text style={styles.orderText}>{lang.toUpperCase()}</Text><Ionicons name="chevron-down" size={13} color={colors.textMuted} /></Pressable></View>
+                {showingOffline && (
+                  <View style={styles.offlineNote}>
+                    <Ionicons name="cloud-offline-outline" size={16} color={colors.textMuted} />
+                    <Text style={styles.offlineNoteText}>
+                      Offline — showing your downloaded chapters.
+                    </Text>
+                    <Pressable onPress={() => chapters.refetch()} hitSlop={10}>
+                      <Text style={styles.offlineRetry}>Retry</Text>
+                    </Pressable>
+                  </View>
+                )}
+                {chaptersFailed && !showingOffline && !offlineChapters.isLoading && (
+                  <View style={styles.offlineNote}>
+                    <Ionicons name="alert-circle-outline" size={16} color={colors.danger} />
+                    <Text style={styles.offlineNoteText}>
+                      Couldn’t load chapters from {source?.name ?? sourceId}.
+                    </Text>
+                    <Pressable onPress={() => chapters.refetch()} hitSlop={10}>
+                      <Text style={styles.offlineRetry}>Retry</Text>
+                    </Pressable>
+                  </View>
+                )}
+                {chapterList && chapterList.length > 0 && (
                   <View style={styles.chapterTools}>
                     <View style={styles.chapterSearch}>
                       <Ionicons name="search-outline" size={17} color={colors.textFaint} />
@@ -693,7 +700,7 @@ export default function MangaDetailsScreen() {
                         size={15}
                         color={colors.textMuted}
                       />
-                      <Text style={styles.orderText}>{newestFirst ? 'New' : 'Old'}</Text>
+                      <Text style={styles.orderText}>{newestFirst ? 'Newest' : 'Oldest'}</Text>
                     </Pressable>
                   </View>
                 )}
@@ -710,7 +717,7 @@ export default function MangaDetailsScreen() {
                       : `No readable chapters here. ${source?.name ?? 'This source'} may have licensed this title (chapters link out). Try another source from the Sources tab — popular titles often read on Mangapill, MangaLib or Remanga.`}
                   </Text>
                 )}
-                {chapters.data && chapters.data.length > 0 && displayedChapters.length === 0 && (
+                {chapterList && chapterList.length > 0 && displayedChapters.length === 0 && (
                   <Text style={styles.muted}>No chapter matches “{chapterQuery}”.</Text>
                 )}
               </>
@@ -722,7 +729,7 @@ export default function MangaDetailsScreen() {
           const isRead = isChapterRead(item);
           return (
             <Pressable
-              style={({ pressed }) => [styles.chapterRow, pressed && styles.chapterRowPressed]}
+              style={({ pressed }) => [styles.chapterRow, isCurrent && styles.currentRow, pressed && styles.chapterRowPressed]}
               onLongPress={() => markUpTo(item)}
               onPress={() =>
                 router.push({
@@ -748,18 +755,22 @@ export default function MangaDetailsScreen() {
                 >
                   {item.chapterNumber ? `Chapter ${item.chapterNumber}` : item.title || 'Oneshot'}
                 </Text>
+                {isCurrent && <View style={styles.currentProgress}><View style={[styles.currentProgressFill, { width: (progressPercent + '%') as `${number}%` }]} /></View>}
+                {(item.title || item.publishedAt) && <Text style={styles.chapterMeta} numberOfLines={1}>{[item.title, item.publishedAt && !Number.isNaN(Date.parse(item.publishedAt)) ? new Date(item.publishedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : null].filter(Boolean).join(' · ')}</Text>}
                 {item.scanlationGroup ? (
                   <Text style={styles.chapterMeta}>{item.scanlationGroup}</Text>
                 ) : null}
               </View>
-              {isCurrent && <Text style={styles.currentTag}>reading</Text>}
+
               {(() => {
                 const key = downloadKey(sourceId, item.externalId);
                 const active = dlActive[key];
                 const isDownloaded = dlSet.has(item.externalId);
                 return (
                   <Pressable
-                    hitSlop={10}
+                    // Slop never reaches into the read toggle next to it — an
+                    // overlap there turned taps on ⬇ into "mark read".
+                    accessibilityLabel={dlSet.has(item.externalId) ? 'Remove chapter download' : 'Download chapter'}
                     style={styles.readToggle}
                     onPress={() => {
                       if (active) return;
@@ -770,10 +781,20 @@ export default function MangaDetailsScreen() {
                             text: 'Delete',
                             style: 'destructive',
                             onPress: () =>
-                              deleteDownload.chapter.mutate({ sourceId, chapterId: item.externalId }),
+                              deleteDownload.chapter.mutate(
+                                { sourceId, chapterId: item.externalId },
+                                {
+                                  onError: () =>
+                                    Alert.alert(
+                                      'Couldn’t delete',
+                                      'The chapter’s files couldn’t be removed. Try again.',
+                                    ),
+                                },
+                              ),
                           },
                         ]);
                       } else {
+                        hapticTap();
                         downloadChapter.mutate({
                           chapterId: item.externalId,
                           chapterNumber: item.chapterNumber,
@@ -787,7 +808,7 @@ export default function MangaDetailsScreen() {
                       </Text>
                     ) : (
                       <Ionicons
-                        name={isDownloaded ? 'arrow-down-circle' : 'arrow-down-circle-outline'}
+                        name={isDownloaded ? 'arrow-down-circle' : 'download-outline'}
                         size={22}
                         color={isDownloaded ? colors.accent : colors.textFaint}
                       />
@@ -796,13 +817,16 @@ export default function MangaDetailsScreen() {
                 );
               })()}
               <Pressable
-                hitSlop={12}
+                accessibilityLabel={isRead ? 'Mark chapter unread' : 'Mark chapter read'}
                 style={styles.readToggle}
                 onPress={() =>
-                  markRead.mutate({
-                    items: [{ chapterId: item.externalId, chapterNumber: item.chapterNumber }],
-                    read: !isRead,
-                  })
+                  {
+                    hapticTap();
+                    markRead.mutate({
+                      items: [{ chapterId: item.externalId, chapterNumber: item.chapterNumber }],
+                      read: !isRead,
+                    });
+                  }
                 }
               >
                 <Ionicons
@@ -843,7 +867,15 @@ export default function MangaDetailsScreen() {
         }
       />
 
-      <BottomSheet visible={statusOpen} title="Status" onClose={() => setStatusOpen(false)}>
+      <BottomSheet visible={sourceOpen} title="Read on" onClose={() => setSourceOpen(false)}>
+        {displayVariants.map(v => <Pressable key={v.sourceId + ':' + v.externalId} style={styles.statusRow} onPress={() => { switchSource(v); setSourceOpen(false); }}><View style={styles.availSourceRow}><View style={[styles.availDot, { backgroundColor: sourceMeta(v.sourceId).color }]} /><Text style={styles.statusRowText}>{sourceMeta(v.sourceId).name}</Text></View>{v.sourceId === sourceId && v.externalId === id && <Ionicons name="checkmark" size={20} color={colors.accent} />}</Pressable>)}
+        <Pressable style={styles.statusRow} onPress={() => { setSourceOpen(false); setLanguageOpen(true); }}><Text style={styles.statusRowText}>Language · {languageLabel(lang)}</Text><Ionicons name="chevron-forward" size={18} color={colors.textMuted} /></Pressable>
+      </BottomSheet>
+      <BottomSheet visible={languageOpen} title="Chapter language" onClose={() => setLanguageOpen(false)}>
+        {(sourceLangs.length ? sourceLangs : [lang]).map(code => <Pressable key={code} style={styles.statusRow} onPress={() => { pickLang(code); setLanguageOpen(false); }}><Text style={styles.statusRowText}>{languageLabel(code)}</Text>{code === lang && <Ionicons name="checkmark" size={20} color={colors.accent} />}</Pressable>)}
+      </BottomSheet>
+      <BottomSheet visible={statusOpen} title="Library status" onClose={() => setStatusOpen(false)}>
+        <Pressable style={styles.statusRow} onPress={() => { const next = !libStatus.data?.favorite; if (next) hapticSuccess(); else hapticTap(); toggleFavorite.mutate(next); }}><Text style={styles.statusRowText}>Favourite</Text><Ionicons name={libStatus.data?.favorite ? 'heart' : 'heart-outline'} size={22} color={colors.accent} /></Pressable>
         {STATUS_KEYS.map((key) => {
           const active = libStatus.data?.inLibrary && (libStatus.data.status ?? 'reading') === key;
           return (
@@ -884,6 +916,18 @@ const styles = StyleSheet.create({
   error: { ...typography.body, color: colors.danger },
   muted: { ...typography.body, color: colors.textMuted, paddingHorizontal: spacing.lg },
 
+  titleOverview: { flexDirection: 'row', alignItems: 'center', width: '100%', gap: 16 },
+  titleInfo: { flex: 1, minWidth: 0, gap: 8 },
+  alsoOn: { ...typography.caption, color: colors.textMuted, lineHeight: 19 },
+  alsoOnButton: { minHeight: 36, justifyContent: 'center' },
+  descriptionToggle: { alignSelf: 'flex-start', paddingHorizontal: 16, minHeight: 32, justifyContent: 'center' },
+  descriptionToggleText: { ...typography.bodyStrong, color: colors.accent },
+  chapterHeadingRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 16, marginTop: 20, marginBottom: 12 },
+  chapterCount: { ...typography.caption, color: colors.textMuted },
+  languageChip: { flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 40, borderRadius: 12, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.bgElevated, paddingHorizontal: 12 },
+  currentRow: { backgroundColor: 'rgba(255,122,48,0.06)' },
+  currentProgress: { height: 3, borderRadius: 3, backgroundColor: colors.border, marginTop: 8, maxWidth: 160, overflow: 'hidden' },
+  currentProgressFill: { height: '100%', backgroundColor: colors.accent },
   hero: {
     alignItems: 'center',
     overflow: 'hidden',
@@ -916,8 +960,9 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(14,11,26,0.34)',
   },
   cover: {
-    width: 128,
-    height: 186,
+    width: '34%',
+    aspectRatio: 0.69,
+    maxWidth: 148,
     borderRadius: radius.md,
     backgroundColor: colors.card,
     borderWidth: 1,
@@ -926,40 +971,23 @@ const styles = StyleSheet.create({
   title: {
     ...typography.h1,
     color: colors.text,
-    textAlign: 'center',
-    marginTop: spacing.md,
-    maxWidth: '94%',
+    fontSize: 25,
+    textAlign: 'left',
   },
   subtitle: {
     ...typography.caption,
     color: colors.textMuted,
-    textAlign: 'center',
-    marginTop: spacing.xs,
+    textAlign: 'left',
+    marginTop: 0,
     textTransform: 'capitalize',
-  },
-  genres: {
-    ...typography.caption,
-    color: colors.purple,
-    textAlign: 'center',
-    marginTop: spacing.xs,
-    maxWidth: '90%',
   },
   genreRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    justifyContent: 'center',
-    gap: spacing.xs,
-    marginTop: spacing.xs,
+    justifyContent: 'flex-start',
+    gap: spacing.sm,
   },
-  genrePill: {
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 3,
-    borderRadius: radius.pill,
-    backgroundColor: colors.card,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  genrePillText: { ...typography.tiny, color: colors.purple, fontWeight: '600' },
+  genrePillText: { ...typography.caption, color: colors.textMuted },
   dlProgress: { ...typography.tiny, color: colors.accent, fontWeight: '700', minWidth: 34, textAlign: 'center' },
   similarSection: { marginTop: spacing.xl, gap: spacing.md },
   similarHeading: {
@@ -967,16 +995,9 @@ const styles = StyleSheet.create({
     color: colors.text,
     paddingHorizontal: spacing.lg,
   },
-  metaChips: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexWrap: 'wrap',
-    gap: spacing.sm,
-    marginTop: spacing.md,
-  },
   metaChip: {
-    minHeight: 32,
+    minHeight: 40,
+    alignSelf: 'flex-start', maxWidth: '100%',
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
@@ -987,15 +1008,12 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
   },
   metaChipDot: { width: 7, height: 7, borderRadius: radius.pill },
-  metaChipText: { ...typography.caption, color: colors.text },
-  readProgressMeta: { alignItems: 'center', gap: 3, marginTop: spacing.md },
-  readProgressTitle: { ...typography.bodyStrong, color: colors.text },
-  readProgressCaption: { ...typography.caption, color: colors.textMuted },
+  metaChipText: { ...typography.caption, color: colors.text, fontWeight: '600', flexShrink: 1 },
 
-  actions: { gap: spacing.sm, paddingHorizontal: spacing.lg, paddingTop: spacing.sm },
+  actions: { flexDirection: 'row', gap: 10, paddingHorizontal: 16, paddingTop: 0, alignItems: 'stretch' },
   primaryBtn: {
-    width: '100%',
-    height: 50,
+    flex: 1,
+    minHeight: 52, paddingHorizontal: 12,
     flexDirection: 'row',
     gap: spacing.sm,
     borderRadius: radius.md,
@@ -1004,13 +1022,13 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   primaryBtnDisabled: { backgroundColor: colors.card },
-  primaryBtnText: { ...typography.bodyStrong, color: '#1A0E06' },
+  primaryBtnText: { ...typography.caption, fontWeight: '700', flexShrink: 1, color: '#1A0E06' },
   primaryBtnTextDisabled: { color: colors.textFaint },
-  secondaryActions: { flexDirection: 'row', gap: spacing.sm },
+  secondaryActions: { maxWidth: '38%' },
   secondaryBtn: {
     flex: 1,
     minWidth: 0,
-    height: 46,
+    minHeight: 52,
     flexDirection: 'row',
     gap: spacing.sm,
     paddingHorizontal: spacing.md,
@@ -1021,54 +1039,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  secondaryBtnText: { ...typography.bodyStrong, color: colors.text },
-
-  availWrap: { paddingHorizontal: spacing.lg, paddingTop: spacing.lg },
-  availTitle: { ...typography.h3, color: colors.text, marginBottom: spacing.sm },
-  availRow: { gap: spacing.sm },
-  availChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    minHeight: 64,
-    padding: spacing.sm,
-    borderRadius: radius.md,
-    backgroundColor: colors.card,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  availCover: {
-    width: 36,
-    height: 50,
-    borderRadius: radius.sm,
-    backgroundColor: colors.bgElevated,
-  },
-  availCoverFallback: { opacity: 0.45 },
-  availInfo: { flex: 1, gap: 3 },
+  secondaryBtnText: { ...typography.caption, color: colors.text, fontWeight: '600', flexShrink: 1 },
   availSourceRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   availDot: { width: 7, height: 7, borderRadius: radius.pill },
-  availSource: { ...typography.caption, color: colors.textMuted, fontWeight: '600' },
-  availConfidence: {
-    ...typography.tiny,
-    color: colors.textFaint,
-    marginLeft: 'auto',
-    textTransform: 'uppercase',
-  },
-  availMatchTitle: { ...typography.bodyStrong, color: colors.text },
-  switchRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
-  switchChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: spacing.md,
-    height: 38,
-    borderRadius: radius.pill,
-    backgroundColor: colors.card,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  switchChipActive: { backgroundColor: colors.accentMuted, borderColor: colors.accent },
-  switchText: { ...typography.caption, color: colors.text, fontWeight: '600' },
   infoBanner: {
     marginHorizontal: spacing.lg,
     marginTop: spacing.lg,
@@ -1086,13 +1059,7 @@ const styles = StyleSheet.create({
     paddingTop: spacing.lg,
     lineHeight: 21,
   },
-  chaptersHeading: {
-    ...typography.h3,
-    color: colors.text,
-    paddingHorizontal: spacing.lg,
-    paddingTop: spacing.xl,
-    paddingBottom: spacing.sm,
-  },
+  chaptersHeading: { ...typography.h3, color: colors.text, flex: 1 },
   chapterTools: {
     flexDirection: 'row',
     gap: spacing.sm,
@@ -1130,11 +1097,30 @@ const styles = StyleSheet.create({
     borderBottomColor: colors.border,
   },
   chapterRowPressed: { backgroundColor: colors.cardPressed },
-  chapterTitle: { ...typography.body, color: colors.text },
+  offlineNote: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginHorizontal: spacing.lg,
+    marginBottom: spacing.sm,
+    padding: spacing.md,
+    borderRadius: radius.md,
+    backgroundColor: colors.card,
+  },
+  offlineNoteText: { ...typography.caption, color: colors.textMuted, flex: 1 },
+  offlineRetry: { ...typography.caption, color: colors.accent, fontWeight: '700' },
+  retryBtn: {
+    paddingHorizontal: spacing.xl,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.pill,
+    backgroundColor: colors.accent,
+  },
+  retryBtnText: { ...typography.bodyStrong, color: '#1A0E06' },
+  backLink: { ...typography.body, color: colors.textMuted },
+  chapterTitle: { ...typography.bodyStrong, color: colors.text },
   chapterRead: { color: colors.textFaint },
-  readToggle: { paddingLeft: spacing.md },
-  chapterMeta: { ...typography.caption, color: colors.textFaint, marginTop: 2 },
-  currentTag: { ...typography.tiny, color: colors.accent, textTransform: 'uppercase' },
+  readToggle: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+  chapterMeta: { ...typography.caption, color: colors.textMuted, marginTop: 2 },
   statusRow: {
     flexDirection: 'row',
     alignItems: 'center',

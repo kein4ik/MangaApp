@@ -1,4 +1,3 @@
-import { MangabuffProvider } from './mangabuff.js';
 import { MangaDexProvider } from './mangadex.js';
 import { MangaLibProvider } from './mangalib.js';
 import { MangapillProvider } from './mangapill.js';
@@ -14,7 +13,6 @@ const providers: SourceProvider[] = [
   new MangapillProvider(),
   new MangaLibProvider(),
   new RemangaProvider(),
-  new MangabuffProvider(),
 ];
 
 const byId = new Map(providers.map((p) => [p.id, p]));

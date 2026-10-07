@@ -1,8 +1,9 @@
 import { Stack, useLocalSearchParams } from 'expo-router';
-import { ActivityIndicator, Dimensions, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Dimensions, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { MangaCard } from '@/components/MangaCard';
+import { GridSkeleton } from '@/components/Skeleton';
 import { useBrowseGenreAll } from '@/data/queries';
 import { sourceMeta } from '@/lib/sourceMeta';
 import { useGuardedRouter } from '@/lib/useGuardedRouter';
@@ -42,7 +43,7 @@ export default function BrowseScreen() {
         </Text>
 
         {isLoading ? (
-          <ActivityIndicator color={colors.accent} style={{ marginTop: spacing.xl }} />
+          <GridSkeleton width={cardWidth} columns={COLS} />
         ) : isError ? (
           <View style={styles.center}>
             <Text style={styles.errText}>Couldn’t load this genre.</Text>

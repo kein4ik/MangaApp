@@ -1,8 +1,12 @@
+import { useUpdatesSnapshot } from '@/components/useUpdatesSnapshot';
+import { MangaCard } from '@/components/MangaCard';
+import { BottomSheet } from '@/components/BottomSheet';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { useFocusEffect } from 'expo-router';
-import { useCallback, useMemo, useState } from 'react';
-import { Alert, FlatList, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Alert, FlatList, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useDeleteDownload, useDownloadedManga, useLibrary } from '@/data/queries';
@@ -35,11 +39,29 @@ function matches(item: LibraryRow, cat: CatKey): boolean {
 
 export default function LibraryScreen() {
   const router = useGuardedRouter();
+  const navigation = useRouter();
   const insets = useSafeAreaInsets();
   const { data, refetch } = useLibrary();
   const downloads = useDownloadedManga();
+  const updates = useUpdatesSnapshot();
   const deleteDownload = useDeleteDownload();
-  const [cat, setCat] = useState<CatKey>('all');
+  const params = useLocalSearchParams<{ category?: string }>();
+  const [cat, setCat] = useState<CatKey>(params.category === 'downloads' ? 'downloads' : 'all');
+  const [grid, setGrid] = useState(true);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const [sort, setSort] = useState<'recent' | 'title'>('recent');
+  const [sortOpen, setSortOpen] = useState(false);
+  const { width, fontScale } = useWindowDimensions();
+  const cols = width < 360 || fontScale > 1.2 ? 2 : 3;
+  const cardWidth = (width - 32 - (cols - 1) * 12) / cols;
+
+  useEffect(() => {
+    if (params.category === 'downloads') {
+      setCat('downloads');
+      navigation.setParams({ category: undefined });
+    }
+  }, [params.category, navigation]);
 
   const refetchDownloads = downloads.refetch;
   useFocusEffect(
@@ -50,7 +72,16 @@ export default function LibraryScreen() {
   );
 
   const all = useMemo(() => data ?? [], [data]);
-  const list = useMemo(() => all.filter((i) => matches(i, cat)), [all, cat]);
+  const list = useMemo(() => {
+    const filtered = all.filter(i => matches(i, cat) && i.title.toLowerCase().includes(search.trim().toLowerCase()));
+    return sort === 'title' ? filtered.sort((a, b) => a.title.localeCompare(b.title)) : filtered;
+  }, [all, cat, search, sort]);
+  const downloadList = useMemo(() => {
+    const filtered = (downloads.data ?? []).filter(item => item.title.toLowerCase().includes(search.trim().toLowerCase()));
+    return sort === 'title' ? filtered.sort((a, b) => a.title.localeCompare(b.title)) : filtered;
+  }, [downloads.data, search, sort]);
+  const unreadByTitle = useMemo(() => new Map(updates?.items.map(item => [item.sourceId + ':' + item.externalId, item.unread])), [updates]);
+  const visibleTitleCount = cat === 'downloads' ? downloadList.length : list.length;
   const countFor = (k: CatKey) =>
     k === 'downloads'
       ? (downloads.data?.length ?? 0)
@@ -58,7 +89,11 @@ export default function LibraryScreen() {
 
   return (
     <View style={[styles.screen, { paddingTop: insets.top + spacing.md }]}>
-      <Text style={styles.title}>My Library</Text>
+      <View style={styles.header}><Text style={styles.title}>Library</Text><View style={styles.headerTools}>
+        <Pressable onPress={() => { if (searchOpen) setSearch(''); setSearchOpen(v => !v); }} style={styles.iconButton} accessibilityLabel="Search library"><Ionicons name="search-outline" size={24} color={colors.text} /></Pressable>
+        <View style={styles.viewToggle}>{[true, false].map(value => <Pressable key={String(value)} onPress={() => setGrid(value)} accessibilityLabel={value ? 'Grid view' : 'List view'} accessibilityState={{ selected: grid === value }} style={[styles.iconButton, grid === value && styles.viewActive]}><Ionicons name={value ? 'grid-outline' : 'list-outline'} size={20} color={grid === value ? colors.accent : colors.textMuted} /></Pressable>)}</View>
+      </View></View>
+      {searchOpen && <View style={styles.searchBox}><Ionicons name="search-outline" size={18} color={colors.textMuted} /><TextInput autoFocus value={search} onChangeText={setSearch} placeholder="Search your library…" placeholderTextColor={colors.textMuted} style={styles.searchInput} /><Pressable accessibilityLabel="Clear search" onPress={() => setSearch('')}><Ionicons name="close" size={20} color={colors.textMuted} /></Pressable></View>}
 
       <View>
         <ScrollView
@@ -73,7 +108,7 @@ export default function LibraryScreen() {
               <Pressable
                 key={c.key}
                 style={[styles.chip, active && styles.chipActive]}
-                onPress={() => setCat(c.key)}
+                onPress={() => { setCat(c.key); }}
               >
                 <Text style={[styles.chipText, active && styles.chipTextActive]}>
                   {c.label}
@@ -85,10 +120,11 @@ export default function LibraryScreen() {
         </ScrollView>
       </View>
 
+      <View style={styles.summary}><Text style={styles.summaryText}>{visibleTitleCount} {visibleTitleCount === 1 ? 'title' : 'titles'}</Text><Pressable onPress={() => setSortOpen(true)} style={styles.sortButton}><Text style={styles.sortText}>{sort === 'recent' ? (cat === 'downloads' ? 'Recently downloaded' : 'Recently read') : 'Title A–Z'}</Text><Ionicons name="chevron-down" size={14} color={colors.textMuted} /></Pressable></View>
       {cat === 'downloads' ? (
-        (downloads.data?.length ?? 0) === 0 ? (
+        downloadList.length === 0 ? (
           <View style={styles.empty}>
-            <Text style={styles.emptyText}>No downloads yet</Text>
+            <Text style={styles.emptyText}>{search ? 'No matching downloads' : 'No downloads yet'}</Text>
             <Text style={styles.emptyHint}>
               Save chapters with the ⬇ button on a manga’s chapter list — they’ll read offline
               from here.
@@ -96,7 +132,7 @@ export default function LibraryScreen() {
           </View>
         ) : (
           <FlatList
-            data={downloads.data}
+            data={downloadList}
             keyExtractor={(item) => `${item.source_id}:${item.manga_external_id}`}
             contentContainerStyle={{ paddingBottom: insets.bottom + spacing.xxl }}
             renderItem={({ item }) => (
@@ -134,10 +170,19 @@ export default function LibraryScreen() {
                           text: 'Delete',
                           style: 'destructive',
                           onPress: () =>
-                            deleteDownload.manga.mutate({
-                              sourceId: item.source_id,
-                              mangaExternalId: item.manga_external_id,
-                            }),
+                            deleteDownload.manga.mutate(
+                              {
+                                sourceId: item.source_id,
+                                mangaExternalId: item.manga_external_id,
+                              },
+                              {
+                                onError: () =>
+                                  Alert.alert(
+                                    'Couldn’t delete',
+                                    'Some files couldn’t be removed. Try again.',
+                                  ),
+                              },
+                            ),
                         },
                       ],
                     )
@@ -152,7 +197,7 @@ export default function LibraryScreen() {
       ) : list.length === 0 ? (
         <View style={styles.empty}>
           <Text style={styles.emptyText}>
-            {cat === 'all' ? 'Your library is empty' : 'Nothing here yet'}
+            {search ? 'No matching titles' : cat === 'all' ? 'Your library is empty' : 'Nothing here yet'}
           </Text>
           <Text style={styles.emptyHint}>
             {cat === 'all'
@@ -162,6 +207,9 @@ export default function LibraryScreen() {
         </View>
       ) : (
         <FlatList
+          key={grid ? 'grid-' + cols : 'list'}
+          numColumns={grid ? cols : 1}
+          columnWrapperStyle={grid ? { gap: 12, paddingHorizontal: 16 } : undefined}
           data={list}
           keyExtractor={(item) => `${item.source_id}:${item.external_id}`}
           removeClippedSubviews
@@ -169,6 +217,12 @@ export default function LibraryScreen() {
           windowSize={5}
           contentContainerStyle={{ paddingBottom: insets.bottom + spacing.xxl }}
           renderItem={({ item }) => {
+            if (grid) return <View style={{ marginBottom: 20 }}><MangaCard width={cardWidth} title={item.title} coverUrl={item.cover_url}
+              subtitle={item.chapter_number ? 'Ch. ' + item.chapter_number + (item.percent ? ' · ' + Math.round(item.percent * 100) + '%' : '') : 'Not started'}
+              progress={item.percent ?? 0}
+              badge={unreadByTitle.get(item.source_id + ':' + item.external_id) ? '+' + unreadByTitle.get(item.source_id + ':' + item.external_id) : undefined}
+              sourceLabel={sourceMeta(item.source_id).name} sourceColor={sourceMeta(item.source_id).color}
+              onPress={() => router.push({ pathname: '/manga/[id]', params: { id: item.external_id, sourceId: item.source_id } })} /></View>;
             const pct = Math.round((item.percent ?? 0) * 100);
             return (
               <Pressable
@@ -189,7 +243,7 @@ export default function LibraryScreen() {
                       {item.chapter_number ? `Chapter ${item.chapter_number}` : 'Not started'}
                     </Text>
                   </View>
-                  <Text style={styles.rowPct}>{pct}% read</Text>
+                  <Text style={styles.rowPct}>{pct}% of current chapter</Text>
                   {item.last_read_at ? (
                     <Text style={styles.rowAgo}>Last read {timeAgo(item.last_read_at)}</Text>
                   ) : null}
@@ -200,13 +254,25 @@ export default function LibraryScreen() {
           }}
         />
       )}
+      <BottomSheet visible={sortOpen} title="Sort library" onClose={() => setSortOpen(false)}>{(['recent', 'title'] as const).map(value => <Pressable key={value} style={styles.row} onPress={() => { setSort(value); setSortOpen(false); }}><Text style={styles.sortText}>{value === 'recent' ? 'Recently read' : 'Title A–Z'}</Text>{value === sort && <Ionicons name="checkmark" size={20} color={colors.accent} />}</Pressable>)}</BottomSheet>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg },
-  title: { ...typography.h1, color: colors.text, paddingHorizontal: spacing.lg },
+  title: { ...typography.h1, color: colors.text },
+  header: { paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 },
+  headerTools: { flexDirection: 'row', gap: 8, alignItems: 'center' },
+  iconButton: { width: 42, height: 42, alignItems: 'center', justifyContent: 'center', borderRadius: 12 },
+  viewToggle: { flexDirection: 'row', borderWidth: 1, borderColor: colors.border, borderRadius: 14, padding: 3, backgroundColor: colors.bgElevated },
+  viewActive: { backgroundColor: 'rgba(255,122,48,0.15)' },
+  summary: { flexDirection: 'row', justifyContent: 'space-between', paddingHorizontal: 16, alignItems: 'center', marginBottom: 18 },
+  summaryText: { ...typography.caption, color: colors.textMuted },
+  sortButton: { flexDirection: 'row', gap: 7, alignItems: 'center', minHeight: 40 },
+  sortText: { ...typography.caption, fontWeight: '600', color: colors.text },
+  searchBox: { marginHorizontal: 16, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12, borderRadius: 12, backgroundColor: colors.bgElevated, borderWidth: 1, borderColor: colors.border },
+  searchInput: { flex: 1, minHeight: 46, color: colors.text, ...typography.body },
 
   chips: { gap: spacing.sm, paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
   chip: {
@@ -215,7 +281,7 @@ const styles = StyleSheet.create({
     borderRadius: radius.pill,
     backgroundColor: colors.card,
   },
-  chipActive: { backgroundColor: colors.accentMuted },
+  chipActive: { backgroundColor: 'rgba(255,122,48,0.15)' },
   chipText: { ...typography.caption, color: colors.textMuted, fontWeight: '600' },
   chipTextActive: { color: colors.accent },
 

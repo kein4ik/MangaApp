@@ -1,6 +1,7 @@
-import { fetchWithTimeout } from '../http';
+import { fetchText, UnexpectedPageError } from '../http';
 import type { SourceProvider } from '../SourceProvider';
 import type {
+  CallOptions,
   Chapter,
   ChapterPage,
   MangaDetails,
@@ -22,14 +23,36 @@ const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36';
 const HEADERS = { 'User-Agent': UA, 'Accept-Language': 'en-US,en;q=0.9', Accept: 'text/html' };
 
-async function getHTML(path: string): Promise<string> {
-  const res = await fetchWithTimeout(`${BASE}${path}`, { headers: HEADERS });
-  if (!res.ok) throw new Error(`MangaKatana ${res.status}`);
-  return res.text();
-}
+const getHTML = (path: string, signal?: AbortSignal) =>
+  fetchText(`${BASE}${path}`, { headers: HEADERS, signal, label: 'MangaKatana' });
 
 const decode = (s: string) =>
   s.replace(/&#0?39;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, '&').trim();
+
+// Every real page links to itself on mangakatana.com in og:url. Error pages —
+// and the empty 200 the site sends for a few seconds after a quick burst —
+// don't, so an empty parse from one of those is an error, not "nothing found".
+const isKatanaPage = (html: string) =>
+  /property="og:url"\s+content="https:\/\/mangakatana\.com/.test(html);
+
+function checked<T>(items: T[], html: string): T[] {
+  if (!items.length && !isKatanaPage(html)) throw new UnexpectedPageError('MangaKatana');
+  return items;
+}
+
+/** A title's own page as a search hit — search jumps straight to it on a single match. */
+function titlePageResult(html: string): MangaSearchResult | null {
+  const slug = html.match(/property="og:url"\s+content="https:\/\/mangakatana\.com\/manga\/([a-z0-9.-]+)"/)?.[1];
+  const title = html.match(/<h1[^>]*class="heading"[^>]*>([^<]+)/)?.[1];
+  if (!slug || !title) return null;
+  return {
+    sourceId: 'mangakatana',
+    externalId: slug,
+    title: decode(title),
+    coverUrl: html.match(/property="og:image"\s+content="([^"]+)"/)?.[1],
+    languages: ['en'],
+  };
+}
 
 function mapStatus(s?: string): MangaStatus {
   const t = (s ?? '').toLowerCase();
@@ -78,12 +101,22 @@ export class MangaKatanaProvider implements SourceProvider {
 
   async trending(options?: SearchOptions): Promise<MangaSearchResult[]> {
     // Catalog ordered by latest update (no real popularity sort on the site).
-    return parseCards(await getHTML('/manga/page/1?filter=1&order=latest'), options?.limit ?? 30);
+    const cards = parseCards(
+      await getHTML('/manga/page/1?filter=1&order=latest', options?.signal),
+      options?.limit ?? 30,
+    );
+    if (!cards.length) throw new UnexpectedPageError('MangaKatana');
+    return cards;
   }
 
   async search(query: string, options?: SearchOptions): Promise<MangaSearchResult[]> {
-    const html = await getHTML(`/?search=${encodeURIComponent(query)}&search_by=book_name`);
-    return parseCards(html, options?.limit ?? 30);
+    const html = await getHTML(
+      `/?search=${encodeURIComponent(query)}&search_by=book_name`,
+      options?.signal,
+    );
+    const single = titlePageResult(html);
+    if (single) return [single];
+    return checked(parseCards(html, options?.limit ?? 30), html);
   }
 
   /** Genre pages are `/genre/{slug}` — slug is the lowercased, dashed name
@@ -92,14 +125,15 @@ export class MangaKatanaProvider implements SourceProvider {
   async browseByGenre(genre: string, options?: SearchOptions): Promise<MangaSearchResult[]> {
     const slug = genre.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
     if (!slug) return [];
-    const html = await getHTML(`/genre/${slug}`);
-    return parseCards(html, options?.limit ?? 30);
+    const html = await getHTML(`/genre/${slug}`, options?.signal);
+    return checked(parseCards(html, options?.limit ?? 30), html);
   }
 
-  async getMangaDetails(externalId: string): Promise<MangaDetails> {
-    const html = await getHTML(`/manga/${externalId}`);
+  async getMangaDetails(externalId: string, options?: CallOptions): Promise<MangaDetails> {
+    const html = await getHTML(`/manga/${externalId}`, options?.signal);
     const title =
       html.match(/<h1[^>]*class="heading"[^>]*>([^<]+)/)?.[1] ?? html.match(/<h1[^>]*>([^<]+)/)?.[1];
+    if (!title || !isKatanaPage(html)) throw new UnexpectedPageError('MangaKatana');
     const coverUrl =
       html.match(/property="og:image"\s+content="([^"]+)"/)?.[1] ??
       html.match(/class="wrap_img">\s*<img[^>]+src="([^"]+)"/)?.[1];
@@ -110,7 +144,7 @@ export class MangaKatanaProvider implements SourceProvider {
     return {
       sourceId: 'mangakatana',
       externalId,
-      title: title ? decode(title) : externalId,
+      title: decode(title) || externalId,
       coverUrl,
       description: description ? decode(description.replace(/<[^>]+>/g, ' ')) : undefined,
       authors: authors.length ? authors : undefined,
@@ -120,8 +154,8 @@ export class MangaKatanaProvider implements SourceProvider {
     };
   }
 
-  async getChapters(externalId: string): Promise<Chapter[]> {
-    const html = await getHTML(`/manga/${externalId}`);
+  async getChapters(externalId: string, _lang?: string, options?: CallOptions): Promise<Chapter[]> {
+    const html = await getHTML(`/manga/${externalId}`, options?.signal);
     const chapters: Chapter[] = [];
     const seen = new Set<string>();
     for (const m of html.matchAll(
@@ -139,16 +173,17 @@ export class MangaKatanaProvider implements SourceProvider {
         language: 'en',
       });
     }
-    return chapters.sort((a, b) => Number(a.chapterNumber) - Number(b.chapterNumber));
+    return checked(chapters, html).sort((a, b) => Number(a.chapterNumber) - Number(b.chapterNumber));
   }
 
-  async getChapterPages(chapterId: string): Promise<ChapterPage[]> {
-    const html = await getHTML(`/manga/${chapterId}`);
+  async getChapterPages(chapterId: string, options?: CallOptions): Promise<ChapterPage[]> {
+    const html = await getHTML(`/manga/${chapterId}`, options?.signal);
     // Reader embeds the page URLs in `var thzq = ['url', 'url', ...];`.
     const arr = html.match(/var\s+thzq\s*=\s*\[([\s\S]*?)\]/);
     const urls = arr ? [...arr[1].matchAll(/'([^']+)'/g)].map((m) => m[1]) : [];
-    return urls
+    const pages = urls
       .filter((u) => /^https?:\/\//.test(u))
       .map((u, index) => ({ index, imageUrl: u, headers: { Referer: `${BASE}/`, 'User-Agent': UA } }));
+    return checked(pages, html);
   }
 }

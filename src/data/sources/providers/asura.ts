@@ -1,6 +1,7 @@
-import { fetchWithTimeout } from '../http';
+import { fetchText, UnexpectedPageError } from '../http';
 import type { SourceProvider } from '../SourceProvider';
 import type {
+  CallOptions,
   Chapter,
   ChapterPage,
   MangaDetails,
@@ -9,7 +10,7 @@ import type {
 } from '../types';
 
 /**
- * Asura Scans (asurascans.com) — EN scanlation aggregator on a Next.js site.
+ * Asura Scans (asurascans.com) — EN scanlation aggregator (an Astro site).
  * Series/chapters/pages are server-rendered, so they scrape cleanly. Text
  * search runs through a JS-only API we can't reach, so instead we pull the
  * site's series sitemap once (cached) and match titles locally. Page images
@@ -22,11 +23,21 @@ const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36';
 const HEADERS = { 'User-Agent': UA, 'Accept-Language': 'en-US,en;q=0.9', Accept: 'text/html' };
 
-async function getHTML(path: string): Promise<string> {
-  const res = await fetchWithTimeout(`${BASE}${path}`, { headers: HEADERS });
-  if (!res.ok) throw new Error(`Asura ${res.status}`);
-  return res.text();
-}
+const getHTML = (path: string, signal?: AbortSignal) =>
+  fetchText(`${BASE}${path}`, { headers: HEADERS, signal, label: 'Asura' });
+
+// Page image URLs, and their sizes, which sit next to each url in the page's
+// island props as `"url":[0,"…"],"width":[0,720],"height":[0,4000]` (quotes
+// HTML-escaped). Knowing the size up front lets the reader lay pages out once.
+const PAGE_URL_RE =
+  /https:\/\/[^"&\\ ]*asura[^"&\\ ]*\/asura-images\/chapters[a-z-]*\/[^"&\\ ]+\.(?:webp|jpg|jpeg|png)(?:\?v=\d+)?/g;
+const PAGE_DIMS_RE =
+  /(https:\/\/[^"&\\ ]*asura-images\/chapters[a-z-]*\/[^"&\\ ]+\.(?:webp|jpg|jpeg|png)(?:\?v=\d+)?)(?:&quot;|\\?")\],(?:&quot;|\\?")width(?:&quot;|\\?"):\[0,(\d+)\],(?:&quot;|\\?")height(?:&quot;|\\?"):\[0,(\d+)\]/g;
+
+// Real pages, as opposed to an error page that still says 200. A series page
+// links to itself (og:url …/comics/{slug}); a chapter page is an article.
+const isSeriesPage = (html: string) => /property="og:url"\s+content="[^"]*\/comics\//.test(html);
+const isChapterPage = (html: string) => /property="og:type"\s+content="article"/.test(html);
 
 /** Catalog/home links carry a per-deploy hash suffix; the clean slug is stable. */
 const cleanSlug = (slug: string) => slug.replace(/-[0-9a-f]{8}$/i, '');
@@ -65,19 +76,28 @@ function parseCards(html: string, limit: number): MangaSearchResult[] {
 
 // Series index from the sitemap, cached so search doesn't refetch every keystroke.
 let indexCache: { at: number; series: { slug: string; title: string }[] } | null = null;
+let indexInFlight: Promise<{ slug: string; title: string }[]> | null = null;
 const INDEX_TTL = 6 * 60 * 60 * 1000;
 
 async function seriesIndex(): Promise<{ slug: string; title: string }[]> {
   if (indexCache && Date.now() - indexCache.at < INDEX_TTL) return indexCache.series;
-  const res = await fetchWithTimeout(`${BASE}/sitemap-series.xml`, { headers: HEADERS });
-  if (!res.ok) throw new Error(`Asura sitemap ${res.status}`);
-  const xml = await res.text();
-  const series = [...xml.matchAll(/\/comics\/([a-z0-9-]+)<\/loc>/g)].map((m) => {
-    const slug = cleanSlug(m[1]);
-    return { slug, title: titleFromSlug(slug) };
-  });
-  indexCache = { at: Date.now(), series };
-  return series;
+  // Shared by every keystroke's search, so it's fetched once and never tied to
+  // (or cancelled with) a single search request.
+  indexInFlight ??= fetchText(`${BASE}/sitemap-series.xml`, { headers: HEADERS, label: 'Asura sitemap' })
+    .then((xml) => {
+      const series = [...xml.matchAll(/\/comics\/([a-z0-9-]+)<\/loc>/g)].map((m) => {
+        const slug = cleanSlug(m[1]);
+        return { slug, title: titleFromSlug(slug) };
+      });
+      // Never cache an empty index: search would find nothing for six hours.
+      if (!series.length) throw new UnexpectedPageError('Asura sitemap');
+      indexCache = { at: Date.now(), series };
+      return series;
+    })
+    .finally(() => {
+      indexInFlight = null;
+    });
+  return indexInFlight;
 }
 
 export class AsuraProvider implements SourceProvider {
@@ -89,9 +109,12 @@ export class AsuraProvider implements SourceProvider {
   supportsReading = true;
 
   async trending(options?: SearchOptions): Promise<MangaSearchResult[]> {
-    // The catalog renders proper cards (title + cover) server-side; the ranking
-    // page is a JS-only list, so we use the catalog for both sorts.
-    return parseCards(await getHTML('/comics?page=1'), options?.limit ?? 30);
+    // Browse renders proper cards (title + cover) server-side, ordered by
+    // latest update unless asked for popularity.
+    const path = options?.sort === 'latest' ? '/browse' : '/browse?sort=popular';
+    const cards = parseCards(await getHTML(path, options?.signal), options?.limit ?? 30);
+    if (!cards.length) throw new UnexpectedPageError('Asura');
+    return cards;
   }
 
   async search(query: string, options?: SearchOptions): Promise<MangaSearchResult[]> {
@@ -104,14 +127,18 @@ export class AsuraProvider implements SourceProvider {
       .map((s) => ({ sourceId: 'asura', externalId: s.slug, title: s.title, languages: ['en'] }));
   }
 
-  async getMangaDetails(externalId: string): Promise<MangaDetails> {
-    const html = await getHTML(`/comics/${externalId}`);
+  async getMangaDetails(externalId: string, options?: CallOptions): Promise<MangaDetails> {
+    const html = await getHTML(`/comics/${externalId}`, options?.signal);
+    if (!isSeriesPage(html)) throw new UnexpectedPageError('Asura');
     const title =
       html.match(/property="og:title"\s+content="([^"]+)"/)?.[1] ??
       html.match(/<title>([^<|]+)/)?.[1];
     const coverUrl = html.match(/property="og:image"\s+content="([^"]+)"/)?.[1];
     const description = html.match(/property="og:description"\s+content="([^"]+)"/)?.[1];
-    const genres = [...html.matchAll(/\/genres\/([a-z0-9-]+)/g)].map((m) => titleFromSlug(m[1]));
+    // Genre chips link to the browse filter: /browse?genres=genius-mc.
+    const genres = [...html.matchAll(/\/browse\?genres=([a-z0-9-]+)"[^>]*>\s*([^<]+?)\s*</g)].map(
+      (m) => m[2].replace(/&amp;/g, '&') || titleFromSlug(m[1]),
+    );
     return {
       sourceId: 'asura',
       externalId,
@@ -123,9 +150,10 @@ export class AsuraProvider implements SourceProvider {
     };
   }
 
-  async getChapters(externalId: string): Promise<Chapter[]> {
-    const html = await getHTML(`/comics/${externalId}`);
+  async getChapters(externalId: string, _lang?: string, options?: CallOptions): Promise<Chapter[]> {
+    const html = await getHTML(`/comics/${externalId}`, options?.signal);
     const nums = [...new Set([...html.matchAll(/\/chapter\/([\d.]+)"/g)].map((m) => m[1]))];
+    if (!nums.length && !isSeriesPage(html)) throw new UnexpectedPageError('Asura');
     return nums
       .map((n) => ({
         sourceId: 'asura',
@@ -137,20 +165,23 @@ export class AsuraProvider implements SourceProvider {
       .sort((a, b) => Number(a.chapterNumber) - Number(b.chapterNumber));
   }
 
-  async getChapterPages(chapterId: string): Promise<ChapterPage[]> {
+  async getChapterPages(chapterId: string, options?: CallOptions): Promise<ChapterPage[]> {
     const sep = chapterId.lastIndexOf(SEP);
     const slug = chapterId.slice(0, sep);
     const num = chapterId.slice(sep + 1);
-    const html = await getHTML(`/comics/${slug}/chapter/${num}`);
+    const html = await getHTML(`/comics/${slug}/chapter/${num}`, options?.signal);
+    const dims = new Map<string, { width: number; height: number }>();
+    for (const m of html.matchAll(PAGE_DIMS_RE)) {
+      dims.set(m[1], { width: Number(m[2]), height: Number(m[3]) });
+    }
     const seen = new Set<string>();
     const pages: ChapterPage[] = [];
-    for (const m of html.matchAll(
-      /https:\/\/[^"&\\ ]*asura[^"&\\ ]*\/asura-images\/chapters[a-z-]*\/[^"&\\ ]+\.(?:webp|jpg|jpeg|png)(?:\?v=\d+)?/g,
-    )) {
+    for (const m of html.matchAll(PAGE_URL_RE)) {
       if (seen.has(m[0])) continue;
       seen.add(m[0]);
-      pages.push({ index: pages.length, imageUrl: m[0] });
+      pages.push({ index: pages.length, imageUrl: m[0], ...dims.get(m[0]) });
     }
+    if (!pages.length && !isChapterPage(html)) throw new UnexpectedPageError('Asura');
     return pages;
   }
 }

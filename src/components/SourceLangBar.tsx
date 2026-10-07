@@ -13,8 +13,7 @@ import { HealthBadge, HealthDot } from './HealthBadge';
 import { languageLabel } from './languages';
 
 /**
- * The source + language switcher (Phase 3). Two chips that open selection
- * sheets. Switching a source resets the language if the new source doesn't
+ * A compact source + language chip with a shared selection sheet. Switching a source resets the language if the new source doesn't
  * offer the current one — we never silently mix sources/languages.
  */
 export function SourceLangBar() {
@@ -22,7 +21,6 @@ export function SourceLangBar() {
     useSettings();
   const sources = useSourcesQuery();
   const [sourceOpen, setSourceOpen] = useState(false);
-  const [langOpen, setLangOpen] = useState(false);
 
   // Only offer sources for enabled content languages that aren't hidden.
   const visibleSources = sources.data?.filter((s) =>
@@ -62,29 +60,17 @@ export function SourceLangBar() {
 
   return (
     <View style={styles.bar}>
-      <Pressable style={styles.chip} onPress={() => setSourceOpen(true)}>
+      <Pressable style={styles.chip} onPress={() => setSourceOpen(true)} accessibilityRole="button" accessibilityLabel="Choose source and language">
         {current && <HealthDot status={current.status} />}
-        <Text style={styles.chipText}>{current?.name ?? selectedSourceId}</Text>
-        <Text style={styles.caret}>▾</Text>
+        <Text style={styles.chipText} numberOfLines={1}>{current?.name ?? selectedSourceId} · {language.toUpperCase()}</Text>
+        <Text style={styles.caret}>⌄</Text>
       </Pressable>
-
-      {/* Only offer a language switch when the source actually has options. */}
-      {langs.length > 1 ? (
-        <Pressable style={styles.chip} onPress={() => setLangOpen(true)}>
-          <Text style={styles.chipText}>{languageLabel(language)}</Text>
-          <Text style={styles.caret}>▾</Text>
-        </Pressable>
-      ) : (
-        <View style={[styles.chip, styles.chipStatic]}>
-          <Text style={styles.chipText}>{languageLabel(langs[0])}</Text>
-        </View>
-      )}
-
       {sources.isLoading && <ActivityIndicator size="small" color={colors.accent} />}
 
       {/* Source selector */}
-      <BottomSheet visible={sourceOpen} title="Source" onClose={() => setSourceOpen(false)}>
+      <BottomSheet visible={sourceOpen} title="Source & language" onClose={() => setSourceOpen(false)}>
         <ScrollView style={{ maxHeight: 360 }}>
+          {langs.length > 1 && <View style={styles.languageRow}>{langs.map(code => <Pressable key={code} style={[styles.languageChip, code === language && styles.rowActive]} onPress={() => setLanguage(code)}><Text style={styles.rowTitle}>{languageLabel(code)}{code === language ? ' ✓' : ''}</Text></Pressable>)}</View>}
           {visibleSources?.map((s) => {
             const active = s.id === selectedSourceId;
             return (
@@ -111,52 +97,33 @@ export function SourceLangBar() {
         </ScrollView>
       </BottomSheet>
 
-      {/* Language selector */}
-      <BottomSheet visible={langOpen} title="Language" onClose={() => setLangOpen(false)}>
-        <ScrollView style={{ maxHeight: 360 }}>
-          {langs.map((code) => {
-            const active = code === language;
-            return (
-              <Pressable
-                key={code}
-                style={[styles.row, active && styles.rowActive]}
-                onPress={() => {
-                  setLanguage(code);
-                  setLangOpen(false);
-                }}
-              >
-                <Text style={styles.rowTitle}>{languageLabel(code)}</Text>
-                {active && <Text style={styles.check}>✓</Text>}
-              </Pressable>
-            );
-          })}
-        </ScrollView>
-      </BottomSheet>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
+  languageRow: { flexDirection: 'row', gap: 8, marginBottom: 12 },
+  languageChip: { padding: 12, borderRadius: 12, borderWidth: 1, borderColor: colors.border },
   bar: {
+    flexShrink: 1,
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.sm,
+    paddingVertical: 0,
   },
   chip: {
+    flexShrink: 1,
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
     borderRadius: radius.pill,
-    backgroundColor: colors.card,
+    backgroundColor: colors.bgElevated,
+    borderWidth: 1, borderColor: colors.border, minHeight: 40, maxWidth: 220,
   },
-  chipStatic: { backgroundColor: colors.bgElevated },
-  chipText: { ...typography.bodyStrong, color: colors.text },
+  chipText: { ...typography.caption, fontWeight: '700', color: colors.text, flexShrink: 1 },
   caret: { color: colors.textFaint, fontSize: 11 },
-  error: { ...typography.body, color: colors.danger, marginBottom: spacing.md },
   row: {
     flexDirection: 'row',
     alignItems: 'center',

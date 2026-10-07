@@ -18,6 +18,7 @@ const STATUS_LABEL: Record<string, string> = {
   slow: 'Slow',
   broken: 'Down',
   disabled: 'Off',
+  unknown: 'Not checked',
 };
 
 export function SourceCard({ source, active, accent, onPress }: Props) {

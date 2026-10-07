@@ -2,6 +2,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 
+import { isRemovedSource } from '@/data/sources/removed';
+
 type SettingsState = {
   selectedSourceId: string;
   language: string;
@@ -29,11 +31,14 @@ export const useSettings = create<SettingsState>()(
       setSource: (selectedSourceId) => set({ selectedSourceId }),
       setLanguage: (language) => set({ language }),
       toggleLanguage: (code) =>
-        set((s) => ({
-          enabledLanguages: s.enabledLanguages.includes(code)
-            ? s.enabledLanguages.filter((x) => x !== code)
-            : [...s.enabledLanguages, code],
-        })),
+        set((s) => {
+          if (!s.enabledLanguages.includes(code)) {
+            return { enabledLanguages: [...s.enabledLanguages, code] };
+          }
+          // Never zero languages: every source would become unusable.
+          if (s.enabledLanguages.length === 1) return s;
+          return { enabledLanguages: s.enabledLanguages.filter((x) => x !== code) };
+        }),
       toggleHidden: (id) =>
         set((s) => ({
           hiddenSources: s.hiddenSources.includes(id)
@@ -45,6 +50,17 @@ export const useSettings = create<SettingsState>()(
     {
       name: 'mangaapp-settings',
       storage: createJSONStorage(() => AsyncStorage),
+      // A source taken out of the app can't stay picked: Home would load nothing.
+      merge: (persisted, current) => {
+        const s = { ...current, ...(persisted as Partial<SettingsState>) };
+        return {
+          ...s,
+          selectedSourceId: isRemovedSource(s.selectedSourceId)
+            ? current.selectedSourceId
+            : s.selectedSourceId,
+          hiddenSources: s.hiddenSources.filter((id) => !isRemovedSource(id)),
+        };
+      },
     },
   ),
 );

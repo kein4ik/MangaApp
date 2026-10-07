@@ -1,5 +1,6 @@
 import { isSourceUsable } from '@/lib/sourceFilter';
 
+import { isAbortError } from './http';
 import { SourceRegistry } from './registry';
 import type { MangaDetails, MangaSearchResult } from './types';
 
@@ -168,15 +169,19 @@ function preferredSearchTitles(manga: MangaDetails, languages: string[]): string
 async function matchOnProvider(
   manga: MangaDetails,
   provider: ReturnType<typeof SourceRegistry.all>[number],
+  enabledLanguages: string[],
+  signal?: AbortSignal,
 ): Promise<CrossSourceMatch | null> {
   const sourceTitles = uniqueTitles([manga.title, ...(manga.altTitles ?? [])]);
   const queries = preferredSearchTitles(manga, provider.languages);
   const candidates = new Map<string, MangaSearchResult>();
+  // Multi-language sources only offer titles readable in the user's languages.
+  const langs = provider.languages.filter((l) => enabledLanguages.includes(l));
 
   // Search the best language-appropriate aliases. Stop early when an exact
   // title/alt-title match is already present to avoid unnecessary requests.
   for (const query of queries) {
-    const results = await provider.search(query, { limit: 12 });
+    const results = await provider.search(query, { limit: 12, langs, signal });
     for (const result of results) candidates.set(result.externalId, result);
     const hasExact = results.some(
       (result) =>
@@ -203,7 +208,7 @@ async function matchOnProvider(
     let candidate: MangaDetails = rankedCandidate.candidate;
     let confidence = rankedCandidate.score;
     try {
-      candidate = await provider.getMangaDetails(rankedCandidate.candidate.externalId);
+      candidate = await provider.getMangaDetails(rankedCandidate.candidate.externalId, { signal });
       const detailedTitleScore = candidateTitleScore(
         sourceTitles,
         uniqueTitles([candidate.title, ...(candidate.altTitles ?? [])]),
@@ -214,7 +219,8 @@ async function matchOnProvider(
         candidate,
         Math.max(rankedCandidate.score, detailedTitleScore),
       );
-    } catch {
+    } catch (e) {
+      if (isAbortError(e)) throw e;
       // A strict search hit is still useful when a details endpoint is
       // temporarily unavailable. If its score is weak, try the next hit.
       if (confidence < 0.78) continue;
@@ -308,6 +314,7 @@ export async function findMatches(
   excludeSourceId: string,
   enabledLanguages: string[],
   hiddenSources: string[],
+  signal?: AbortSignal,
 ): Promise<CrossSourceMatch[]> {
   const targets = SourceRegistry.all().filter(
     (provider) =>
@@ -319,7 +326,7 @@ export async function findMatches(
   const found = await Promise.all(
     targets.map(async (provider) => {
       try {
-        return await matchOnProvider(manga, provider);
+        return await matchOnProvider(manga, provider, enabledLanguages, signal);
       } catch {
         return null;
       }

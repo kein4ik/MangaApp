@@ -48,16 +48,28 @@ export type ChapterPage = {
   expiresAt?: string;
 };
 
-export type SearchOptions = {
+/** What every provider call accepts. */
+export type CallOptions = {
+  /** Cancels the request when the caller no longer needs it. */
+  signal?: AbortSignal;
+};
+
+export type SearchOptions = CallOptions & {
   lang?: string;
+  /**
+   * Content languages the results must be readable in. Multi-language sources
+   * (MangaDex) filter by them; single-language sources ignore it.
+   */
+  langs?: string[];
   limit?: number;
   offset?: number;
   sort?: 'popular' | 'latest';
 };
 
-export type SourceStatus = 'online' | 'slow' | 'broken' | 'disabled';
+/** `unknown` = no traffic to this source yet in this session. */
+export type SourceStatus = 'online' | 'slow' | 'broken' | 'disabled' | 'unknown';
 
-/** Source capabilities + live health, as returned by the backend GET /sources. */
+/** Source capabilities + live health (learned from the app's own requests). */
 export type SourceInfo = {
   id: string;
   name: string;

@@ -1,5 +1,7 @@
 import * as SQLite from 'expo-sqlite';
 
+import { REMOVED_SOURCES } from '@/data/sources/removed';
+
 /**
  * Local offline-first store. Holds what must open fast and work even when a
  * source is down: cached manga, reading progress, library. `dirty_for_sync`
@@ -11,7 +13,10 @@ let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
 async function init(): Promise<SQLite.SQLiteDatabase> {
   const db = await SQLite.openDatabaseAsync('mangaapp.db');
+  // busy_timeout: the headless background task opens its own connection; wait
+  // for its write lock instead of failing with "database is locked".
   await db.execAsync(`
+    PRAGMA busy_timeout = 5000;
     PRAGMA journal_mode = WAL;
 
     CREATE TABLE IF NOT EXISTS cached_manga (
@@ -120,18 +125,121 @@ async function init(): Promise<SQLite.SQLiteDatabase> {
   if (!cols.some((c) => c.name === 'read')) {
     await db.execAsync(`ALTER TABLE reading_progress ADD COLUMN read INTEGER NOT NULL DEFAULT 0`);
   }
+  // `opened_at` is set only by the reader, so rows created by "mark as read"
+  // (opened_at NULL) can never pose as where the user actually is. Backfill:
+  // rows the mark buttons made have page 0 and percent exactly 0 or 1.
+  if (!cols.some((c) => c.name === 'opened_at')) {
+    await db.execAsync(`
+      ALTER TABLE reading_progress ADD COLUMN opened_at INTEGER;
+      UPDATE reading_progress SET opened_at = updated_at
+        WHERE NOT (page_index = 0 AND (percent = 0 OR percent = 1));
+    `);
+  }
   // `genres` (JSON array) on cached titles powers the Home "For you" rails.
   const mangaCols = await db.getAllAsync<{ name: string }>(`PRAGMA table_info(cached_manga)`);
   if (!mangaCols.some((c) => c.name === 'genres')) {
     await db.execAsync(`ALTER TABLE cached_manga ADD COLUMN genres TEXT`);
   }
 
+  await purgeRemovedSources(db);
   return db;
 }
 
+/** Tables keyed by a source id — everything a removed source can leave behind. */
+const SOURCE_TABLES = [
+  'library_items',
+  'reading_progress',
+  'cached_manga',
+  'work_source',
+  'work_pref',
+  'downloads',
+  'dead_chapters',
+  'notify_watermark',
+] as const;
+
+/**
+ * Drop every row of a source taken out of the app (their titles can't load any
+ * more). A work also linked to another source stays in the library through that
+ * link: the other entry gets the library row and, if it was never opened on its
+ * own, the title text to show. Reading positions can't move (chapter ids are
+ * per source) and go with the source. A cheap no-op once clean.
+ */
+async function purgeRemovedSources(db: SQLite.SQLiteDatabase): Promise<void> {
+  const ids = [...REMOVED_SOURCES];
+  if (!ids.length) return;
+  const list = ids.map(() => '?').join(', ');
+
+  let stale = false;
+  for (const table of SOURCE_TABLES) {
+    if (await db.getFirstAsync(`SELECT 1 FROM ${table} WHERE source_id IN (${list}) LIMIT 1`, ...ids)) {
+      stale = true;
+      break;
+    }
+  }
+  if (!stale) return;
+
+  await db.withTransactionAsync(async () => {
+    await db.runAsync(
+      `INSERT OR IGNORE INTO library_items
+        (source_id, manga_external_id, status, favorite, last_read_at, dirty_for_sync)
+       SELECT o.source_id, o.external_id, l.status, l.favorite, l.last_read_at, 1
+       FROM library_items l
+       JOIN work_source w ON w.source_id = l.source_id AND w.external_id = l.manga_external_id
+       JOIN work_source o ON o.group_id = w.group_id AND o.source_id NOT IN (${list})
+       WHERE l.source_id IN (${list})`,
+      ...ids,
+      ...ids,
+    );
+    // No cover: the removed source's image host is what's unreachable.
+    await db.runAsync(
+      `INSERT OR IGNORE INTO cached_manga
+        (source_id, external_id, title, cover_url, description, genres, updated_at)
+       SELECT o.source_id, o.external_id, m.title, NULL, m.description, m.genres, m.updated_at
+       FROM cached_manga m
+       JOIN work_source w ON w.source_id = m.source_id AND w.external_id = m.external_id
+       JOIN work_source o ON o.group_id = w.group_id AND o.source_id NOT IN (${list})
+       WHERE m.source_id IN (${list})`,
+      ...ids,
+      ...ids,
+    );
+    for (const table of SOURCE_TABLES) {
+      await db.runAsync(`DELETE FROM ${table} WHERE source_id IN (${list})`, ...ids);
+    }
+    // Prefs of works never linked are keyed `source:external`.
+    for (const id of ids) {
+      await db.runAsync(`DELETE FROM work_pref WHERE pref_key LIKE ?`, `${id}:%`);
+    }
+  });
+}
+
 export function getDb(): Promise<SQLite.SQLiteDatabase> {
-  if (!dbPromise) dbPromise = init();
+  if (!dbPromise) {
+    dbPromise = init().catch((e) => {
+      // Don't cache a failed open (a transient lock, a crash mid-migration) —
+      // the next call gets a fresh attempt instead of the same error forever.
+      dbPromise = null;
+      throw e;
+    });
+  }
   return dbPromise;
+}
+
+// Our multi-statement writes run one at a time: expo-sqlite's transactions
+// share the connection, so two overlapping BEGINs would fail.
+let txChain: Promise<unknown> = Promise.resolve();
+
+/** Run `task` inside a transaction (atomic + one fsync instead of hundreds). */
+async function inTransaction<T>(task: (db: SQLite.SQLiteDatabase) => Promise<T>): Promise<T> {
+  const db = await getDb();
+  const run = txChain.then(async () => {
+    let result!: T;
+    await db.withTransactionAsync(async () => {
+      result = await task(db);
+    });
+    return result;
+  });
+  txChain = run.catch(() => {});
+  return run;
 }
 
 // ---- cached_manga ----
@@ -168,6 +276,30 @@ export async function cacheManga(m: CachedManga): Promise<void> {
   );
 }
 
+export type CachedMangaRow = {
+  source_id: string;
+  external_id: string;
+  title: string;
+  cover_url: string | null;
+  description: string | null;
+  /** JSON array of genre names. */
+  genres: string | null;
+};
+
+/** The locally cached title info — lets a title page open without network. */
+export async function getCachedManga(
+  sourceId: string,
+  externalId: string,
+): Promise<CachedMangaRow | null> {
+  const db = await getDb();
+  return db.getFirstAsync<CachedMangaRow>(
+    `SELECT source_id, external_id, title, cover_url, description, genres
+     FROM cached_manga WHERE source_id = ? AND external_id = ?`,
+    sourceId,
+    externalId,
+  );
+}
+
 // ---- reading_progress ----
 export type ProgressRow = {
   source_id: string;
@@ -178,6 +310,9 @@ export type ProgressRow = {
   page_index: number;
   percent: number;
   updated_at: number;
+  read: number;
+  /** When the reader last had this chapter open; null = only marked read/unread. */
+  opened_at: number | null;
 };
 
 export async function saveProgress(p: {
@@ -196,8 +331,8 @@ export async function saveProgress(p: {
   const read = p.percent >= 0.9 ? 1 : 0;
   await db.runAsync(
     `INSERT INTO reading_progress
-      (source_id, manga_external_id, chapter_id, chapter_number, language, page_index, percent, updated_at, dirty_for_sync, read)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+      (source_id, manga_external_id, chapter_id, chapter_number, language, page_index, percent, updated_at, dirty_for_sync, read, opened_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
      ON CONFLICT(source_id, manga_external_id, chapter_id) DO UPDATE SET
        chapter_number = excluded.chapter_number,
        language = excluded.language,
@@ -205,7 +340,8 @@ export async function saveProgress(p: {
        percent = excluded.percent,
        updated_at = excluded.updated_at,
        dirty_for_sync = 1,
-       read = MAX(reading_progress.read, excluded.read)`,
+       read = MAX(reading_progress.read, excluded.read),
+       opened_at = excluded.opened_at`,
     p.sourceId,
     p.mangaExternalId,
     p.chapterId,
@@ -215,6 +351,7 @@ export async function saveProgress(p: {
     p.percent,
     now,
     read,
+    now,
   );
   // Touch the library row so "Continue Reading" can order by recency.
   await db.runAsync(
@@ -226,6 +363,11 @@ export async function saveProgress(p: {
   );
 }
 
+// "Where the user is" for a title: the chapter the reader had open most
+// recently; only when nothing was ever opened, the highest marked chapter.
+const LATEST_PROGRESS_ORDER = `(opened_at IS NULL), opened_at DESC, updated_at DESC,
+  CAST(chapter_number AS REAL) DESC`;
+
 export async function getMangaProgress(
   sourceId: string,
   mangaExternalId: string,
@@ -234,7 +376,7 @@ export async function getMangaProgress(
   return db.getFirstAsync<ProgressRow>(
     `SELECT * FROM reading_progress
      WHERE source_id = ? AND manga_external_id = ?
-     ORDER BY updated_at DESC LIMIT 1`,
+     ORDER BY ${LATEST_PROGRESS_ORDER} LIMIT 1`,
     sourceId,
     mangaExternalId,
   );
@@ -313,6 +455,21 @@ export async function getDownloadedChapterIds(
     mangaExternalId,
   );
   return rows.map((r) => r.chapter_id);
+}
+
+/** A title's downloaded chapters, for the offline chapter list. */
+export async function getMangaDownloadChapters(
+  sourceId: string,
+  mangaExternalId: string,
+): Promise<{ chapter_id: string; chapter_number: string | null; language: string }[]> {
+  const db = await getDb();
+  return db.getAllAsync(
+    `SELECT chapter_id, chapter_number, language FROM downloads
+     WHERE source_id = ? AND manga_external_id = ?
+     ORDER BY CAST(chapter_number AS REAL), created_at`,
+    sourceId,
+    mangaExternalId,
+  );
 }
 
 export type DownloadedManga = {
@@ -457,35 +614,79 @@ export async function getReadChapterNumbers(
 }
 
 /**
- * Explicitly mark chapters read/unread (the Mark-as-read buttons). Creates a
- * row for chapters with no progress yet. Doesn't touch library last_read_at, so
- * bookkeeping never hijacks the Continue Reading order.
+ * Explicitly mark chapters read/unread (the Mark-as-read buttons).
+ *
+ * Marking creates rows for chapters with no progress yet, but with
+ * `opened_at` NULL — so a mark can never pose as the chapter the user is on
+ * (Continue Reading) or duplicate the title there. Unmarking only updates rows
+ * that exist, and clears the chapter NUMBER across every linked source (and
+ * duplicate scanlations), since read state is shared by number.
  */
 export async function markChaptersRead(
   sourceId: string,
   mangaExternalId: string,
   chapters: { chapterId: string; chapterNumber?: string }[],
   read: boolean,
+  language?: string,
 ): Promise<void> {
-  const db = await getDb();
-  const now = Date.now();
-  const flag = read ? 1 : 0;
-  for (const c of chapters) {
-    await db.runAsync(
-      `INSERT INTO reading_progress
-        (source_id, manga_external_id, chapter_id, chapter_number, page_index, percent, updated_at, dirty_for_sync, read)
-       VALUES (?, ?, ?, ?, 0, ?, ?, 1, ?)
-       ON CONFLICT(source_id, manga_external_id, chapter_id) DO UPDATE SET
-         read = excluded.read, dirty_for_sync = 1`,
-      sourceId,
-      mangaExternalId,
-      c.chapterId,
-      c.chapterNumber ?? null,
-      flag, // percent: 1 when marking read, 0 when unread (only on first insert)
-      now,
-      flag,
+  if (chapters.length === 0) return;
+  await inTransaction(async (db) => {
+    if (read) {
+      const now = Date.now();
+      const stmt = await db.prepareAsync(
+        `INSERT INTO reading_progress
+          (source_id, manga_external_id, chapter_id, chapter_number, language, page_index, percent, updated_at, dirty_for_sync, read, opened_at)
+         VALUES (?, ?, ?, ?, ?, 0, 1, ?, 1, 1, NULL)
+         ON CONFLICT(source_id, manga_external_id, chapter_id) DO UPDATE SET
+           read = 1, dirty_for_sync = 1`,
+      );
+      try {
+        for (const c of chapters) {
+          await stmt.executeAsync([
+            sourceId,
+            mangaExternalId,
+            c.chapterId,
+            c.chapterNumber ?? null,
+            language ?? null,
+            now,
+          ]);
+        }
+      } finally {
+        await stmt.finalizeAsync();
+      }
+      return;
+    }
+
+    const ids = new Set(chapters.map((c) => c.chapterId));
+    const nums = new Set(
+      chapters.map((c) => normChapterNumber(c.chapterNumber)).filter((n): n is string => !!n),
     );
-  }
+    const targets = await groupTargets(sourceId, mangaExternalId);
+    const where = targets.map(() => '(source_id = ? AND manga_external_id = ?)').join(' OR ');
+    const rows = await db.getAllAsync<{
+      source_id: string;
+      manga_external_id: string;
+      chapter_id: string;
+      chapter_number: string | null;
+    }>(
+      `SELECT source_id, manga_external_id, chapter_id, chapter_number FROM reading_progress
+       WHERE read = 1 AND (${where})`,
+      ...targets.flatMap((t) => [t.sourceId, t.externalId]),
+    );
+    for (const r of rows) {
+      const own = r.source_id === sourceId && r.manga_external_id === mangaExternalId;
+      const n = normChapterNumber(r.chapter_number);
+      if ((own && ids.has(r.chapter_id)) || (n && nums.has(n))) {
+        await db.runAsync(
+          `UPDATE reading_progress SET read = 0, dirty_for_sync = 1
+           WHERE source_id = ? AND manga_external_id = ? AND chapter_id = ?`,
+          r.source_id,
+          r.manga_external_id,
+          r.chapter_id,
+        );
+      }
+    }
+  });
 }
 
 // ---- dead_chapters (known-empty source+title+language) ----
@@ -587,38 +788,69 @@ export type LinkInput = {
 };
 
 /**
- * Record that several source entries are the same work. Reuses an existing
- * group if any member already has one (merging), otherwise mints a new id.
+ * Record that several source entries are the same work. If members already
+ * belong to groups, those groups are MERGED — every variant of every group
+ * moves into one, so none is left behind in an old group. The per-work source
+ * preference moves to the surviving group key. All in one transaction.
  * Linking is non-destructive: source rows keep working on their own.
  */
 export async function linkWork(members: LinkInput[]): Promise<string | null> {
   if (members.length < 2) return null;
-  const db = await getDb();
-
-  let groupId: string | null = null;
-  for (const m of members) {
-    const existing = await getGroupId(m.sourceId, m.externalId);
-    if (existing) {
-      groupId = existing;
-      break;
+  return inTransaction(async (db) => {
+    const groups: string[] = [];
+    for (const m of members) {
+      const g = await getGroupId(m.sourceId, m.externalId);
+      if (g && !groups.includes(g)) groups.push(g);
     }
-  }
-  if (!groupId) groupId = genGroupId();
+    const groupId = groups[0] ?? genGroupId();
+    const absorbed = groups.slice(1);
 
-  for (const m of members) {
-    await db.runAsync(
-      `INSERT OR REPLACE INTO work_source
-        (group_id, source_id, external_id, language, confidence, is_primary)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+    for (const g of absorbed) {
+      await db.runAsync(`UPDATE work_source SET group_id = ? WHERE group_id = ?`, groupId, g);
+    }
+    for (const m of members) {
+      await db.runAsync(
+        `INSERT INTO work_source
+          (group_id, source_id, external_id, language, confidence, is_primary)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(source_id, external_id) DO UPDATE SET
+           group_id = excluded.group_id,
+           language = COALESCE(excluded.language, work_source.language),
+           confidence = excluded.confidence,
+           is_primary = MAX(work_source.is_primary, excluded.is_primary)`,
+        groupId,
+        m.sourceId,
+        m.externalId,
+        m.language ?? null,
+        m.confidence ?? 1,
+        m.primary ? 1 : 0,
+      );
+    }
+
+    // Prefs were keyed by the old group ids, or by `source:external` for
+    // members that weren't grouped yet — keep the first one found (unless the
+    // surviving group already has its own) and drop the now-unreachable rest.
+    const oldKeys = [...absorbed, ...members.map((m) => `${m.sourceId}:${m.externalId}`)];
+    const kept = await db.getFirstAsync<{ pref_key: string }>(
+      `SELECT pref_key FROM work_pref WHERE pref_key = ?`,
       groupId,
-      m.sourceId,
-      m.externalId,
-      m.language ?? null,
-      m.confidence ?? 1,
-      m.primary ? 1 : 0,
     );
-  }
-  return groupId;
+    if (!kept) {
+      for (const key of oldKeys) {
+        const moved = await db.runAsync(
+          `UPDATE work_pref SET pref_key = ? WHERE pref_key = ?`,
+          groupId,
+          key,
+        );
+        if (moved.changes > 0) break;
+      }
+    }
+    await db.runAsync(
+      `DELETE FROM work_pref WHERE pref_key IN (${oldKeys.map(() => '?').join(', ')})`,
+      ...oldKeys,
+    );
+    return groupId;
+  });
 }
 
 /** A work's preferred source+language (what to open by default). Keyed by the
@@ -853,19 +1085,30 @@ export type LibraryRow = {
  */
 export async function getLibrary(): Promise<LibraryRow[]> {
   const db = await getDb();
+  // Exactly ONE progress row per title (ROW_NUMBER), so ties in updated_at —
+  // e.g. a batch of chapters marked read in the same millisecond — can't
+  // multiply rows. Language falls back to any row that recorded one.
   const rows = await db.getAllAsync<LibraryRow>(
     `SELECT l.source_id, l.manga_external_id AS external_id, l.favorite, l.status, l.last_read_at,
             m.title, m.cover_url, m.genres,
-            p.chapter_id, p.chapter_number, p.language, p.percent
+            p.chapter_id, p.chapter_number, p.percent,
+            COALESCE(p.language, (
+              SELECT r.language FROM reading_progress r
+              WHERE r.source_id = l.source_id AND r.manga_external_id = l.manga_external_id
+                AND r.language IS NOT NULL
+              ORDER BY (r.opened_at IS NULL), r.opened_at DESC, r.updated_at DESC LIMIT 1
+            )) AS language
      FROM library_items l
      JOIN cached_manga m
        ON m.source_id = l.source_id AND m.external_id = l.manga_external_id
-     LEFT JOIN reading_progress p
-       ON p.source_id = l.source_id AND p.manga_external_id = l.manga_external_id
-       AND p.updated_at = (
-         SELECT MAX(updated_at) FROM reading_progress
-         WHERE source_id = l.source_id AND manga_external_id = l.manga_external_id
-       )
+     LEFT JOIN (
+       SELECT source_id, manga_external_id, chapter_id, chapter_number, language, percent,
+              ROW_NUMBER() OVER (
+                PARTITION BY source_id, manga_external_id ORDER BY ${LATEST_PROGRESS_ORDER}
+              ) AS rn
+       FROM reading_progress
+     ) p
+       ON p.source_id = l.source_id AND p.manga_external_id = l.manga_external_id AND p.rn = 1
      ORDER BY l.last_read_at DESC NULLS LAST`,
   );
 
@@ -891,7 +1134,11 @@ export async function getLibrary(): Promise<LibraryRow[]> {
   return order.map((key) => byGroup.get(key)!);
 }
 
-/** Manga the user has progress in, for the Home "Continue Reading" rail. */
+/**
+ * Manga the user actually read (opened in the reader), one row per title, for
+ * the Home "Continue Reading" rail. Chapters only MARKED read don't count —
+ * they used to hijack the position and fill the rail with copies of one title.
+ */
 export async function getContinueReading(limit = 12): Promise<
   {
     source_id: string;
@@ -907,17 +1154,22 @@ export async function getContinueReading(limit = 12): Promise<
 > {
   const db = await getDb();
   return db.getAllAsync(
-    `SELECT p.source_id, p.manga_external_id AS external_id,
-            p.chapter_id, p.chapter_number, p.language, p.page_index, p.percent,
-            m.title, m.cover_url
-     FROM reading_progress p
-     JOIN cached_manga m
-       ON m.source_id = p.source_id AND m.external_id = p.manga_external_id
-     WHERE p.updated_at = (
-       SELECT MAX(updated_at) FROM reading_progress
-       WHERE source_id = p.source_id AND manga_external_id = p.manga_external_id
+    `SELECT source_id, external_id, chapter_id, chapter_number, language, page_index, percent,
+            title, cover_url
+     FROM (
+       SELECT p.source_id, p.manga_external_id AS external_id,
+              p.chapter_id, p.chapter_number, p.language, p.page_index, p.percent, p.opened_at,
+              m.title, m.cover_url,
+              ROW_NUMBER() OVER (
+                PARTITION BY p.source_id, p.manga_external_id ORDER BY p.opened_at DESC
+              ) AS rn
+       FROM reading_progress p
+       JOIN cached_manga m
+         ON m.source_id = p.source_id AND m.external_id = p.manga_external_id
+       WHERE p.opened_at IS NOT NULL
      )
-     ORDER BY p.updated_at DESC
+     WHERE rn = 1
+     ORDER BY opened_at DESC
      LIMIT ?`,
     limit,
   );

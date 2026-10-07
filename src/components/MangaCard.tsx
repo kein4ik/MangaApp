@@ -1,128 +1,35 @@
-import { Image } from 'expo-image';
 import { memo } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
-
-import { imageSource } from '@/lib/imageSource';
-import { colors, radius } from '@/theme/colors';
+import Animated, { useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
+import { CoverArt } from './CoverArt';
+import { colors } from '@/theme/colors';
 import { typography } from '@/theme/typography';
-
-type Props = {
-  title: string;
-  coverUrl?: string | null;
-  subtitle?: string;
-  /** 0..1 reading progress; renders an orange bar when > 0. */
-  progress?: number;
-  /** Optional source badge shown on the cover (e.g. "MangaLib"). */
-  sourceLabel?: string;
-  sourceColor?: string;
-  width: number;
-  onPress: () => void;
-};
-
-/**
- * Memoized: rails and grids re-render whenever their screen's state changes
- * (a filter chip, a loaded query), and without this every visible cover
- * re-rendered with it. Comparing props is far cheaper than rebuilding cards.
- */
-export const MangaCard = memo(function MangaCard({
-  title,
-  coverUrl,
-  subtitle,
-  progress = 0,
-  sourceLabel,
-  sourceColor,
-  width,
-  onPress,
-}: Props) {
-  return (
-    <Pressable
-      onPress={onPress}
-      style={({ pressed }) => [{ width, opacity: pressed ? 0.7 : 1 }]}
-    >
-      <View style={[styles.cover, { width, height: width * 1.45 }]}>
-        {coverUrl ? (
-          <Image
-            source={imageSource(coverUrl)}
-            style={StyleSheet.absoluteFill}
-            contentFit="cover"
-            transition={200}
-            cachePolicy="memory-disk"
-          />
-        ) : (
-          <View style={[StyleSheet.absoluteFill, styles.placeholder]}>
-            <Text style={styles.placeholderText}>{title.slice(0, 1)}</Text>
-          </View>
-        )}
-        {sourceLabel && (
-          <View style={[styles.sourceBadge, { backgroundColor: sourceColor ?? colors.purple }]}>
-            <Text style={styles.sourceBadgeText} numberOfLines={1}>
-              {sourceLabel}
-            </Text>
-          </View>
-        )}
-        {progress > 0 && (
-          <View style={styles.progressTrack}>
-            <View style={[styles.progressFill, { width: `${Math.min(progress, 1) * 100}%` }]} />
-          </View>
-        )}
-      </View>
-      <Text numberOfLines={2} style={styles.title}>
-        {title}
-      </Text>
-      {subtitle ? (
-        <Text numberOfLines={1} style={styles.subtitle}>
-          {subtitle}
-        </Text>
-      ) : null}
-    </Pressable>
-  );
+const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
+type Props = { title: string; coverUrl?: string | null; subtitle?: string; progress?: number; sourceLabel?: string; sourceColor?: string; badge?: string; width: number; onPress: () => void };
+export const MangaCard = memo(function MangaCard({ title, coverUrl, subtitle, progress = 0, sourceLabel, sourceColor, badge, width, onPress }: Props) {
+  const scale = useSharedValue(1);
+  const animatedStyle = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
+  return <AnimatedPressable accessibilityRole="button" accessibilityLabel={title} onPress={onPress}
+    onPressIn={() => { scale.value = withSpring(0.97, { damping: 18, stiffness: 320 }); }}
+    onPressOut={() => { scale.value = withSpring(1, { damping: 16, stiffness: 260 }); }}
+    style={[{ width }, animatedStyle]}>
+    <View><CoverArt uri={coverUrl} title={title} style={{ width, height: width * 1.45 }} />
+      {!!badge && <View style={styles.badge}><Text style={styles.badgeText}>{badge}</Text></View>}
+    </View>
+    <Text numberOfLines={2} style={styles.title}>{title}</Text>
+    {!!subtitle && <Text numberOfLines={1} style={styles.subtitle}>{subtitle}</Text>}
+    {progress > 0 && <View style={styles.track}><View style={[styles.fill, { width: ((Math.min(1, progress) * 100) + '%') as `${number}%` }]} /></View>}
+    {!!sourceLabel && <View style={styles.source}><View style={[styles.dot, { backgroundColor: sourceColor ?? colors.purple }]} /><Text style={styles.sourceText} numberOfLines={1}>{sourceLabel}</Text></View>}
+  </AnimatedPressable>;
 });
-
 const styles = StyleSheet.create({
-  cover: {
-    borderRadius: radius.md,
-    overflow: 'hidden',
-    backgroundColor: colors.card,
-  },
-  placeholder: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: colors.card,
-  },
-  placeholderText: {
-    ...typography.h1,
-    color: colors.textFaint,
-  },
-  sourceBadge: {
-    position: 'absolute',
-    top: 6,
-    left: 6,
-    maxWidth: '85%',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: radius.sm,
-  },
-  sourceBadgeText: { ...typography.tiny, color: '#fff', fontWeight: '700' },
-  progressTrack: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    height: 3,
-    backgroundColor: 'rgba(0,0,0,0.4)',
-  },
-  progressFill: {
-    height: 3,
-    backgroundColor: colors.accent,
-  },
-  title: {
-    ...typography.bodyStrong,
-    color: colors.text,
-    marginTop: 6,
-  },
-  subtitle: {
-    ...typography.caption,
-    color: colors.textMuted,
-    marginTop: 2,
-  },
+  title: { ...typography.bodyStrong, color: colors.text, marginTop: 7, lineHeight: 19 },
+  subtitle: { ...typography.caption, color: colors.textMuted, marginTop: 3 },
+  track: { height: 3, backgroundColor: colors.border, borderRadius: 2, marginTop: 7, overflow: 'hidden' },
+  fill: { height: '100%', backgroundColor: colors.accent, borderRadius: 2 },
+  source: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 4 },
+  dot: { width: 6, height: 6, borderRadius: 3 },
+  sourceText: { ...typography.tiny, color: colors.textMuted, flexShrink: 1 },
+  badge: { position: 'absolute', right: 6, top: 6, borderRadius: 6, backgroundColor: colors.accent, paddingHorizontal: 6, paddingVertical: 3 },
+  badgeText: { ...typography.tiny, color: '#1A0E06', fontWeight: '800' },
 });

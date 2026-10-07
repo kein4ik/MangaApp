@@ -1,6 +1,9 @@
-import { fetchWithTimeout } from '../http';
+import { mapLimit } from '@/lib/pool';
+
+import { fetchJSON } from '../http';
 import type { SourceProvider } from '../SourceProvider';
 import type {
+  CallOptions,
   Chapter,
   ChapterPage,
   MangaDetails,
@@ -41,10 +44,15 @@ type MdChapter = {
   relationships: MdRelationship[];
 };
 
-async function getJSON<T>(url: string): Promise<T> {
-  const res = await fetchWithTimeout(url, { headers: HEADERS });
-  if (!res.ok) throw new Error(`MangaDex ${res.status}`);
-  return (await res.json()) as T;
+// The http gate paces MangaDex to its ~5 req/s limit; a 429 that still slips
+// through waits for the server's Retry-After instead of failing the whole list.
+const getJSON = <T>(url: string, signal?: AbortSignal) =>
+  fetchJSON<T>(url, { headers: HEADERS, signal, label: 'MangaDex', retries429: 2 });
+
+/** Languages to filter results by: every requested one MangaDex actually has. */
+function wantedLangs(options: SearchOptions | undefined, supported: string[]): string[] {
+  const langs = options?.langs?.length ? options.langs : options?.lang ? [options.lang] : [];
+  return langs.filter((l) => supported.includes(l));
 }
 
 function pickText(map: Record<string, string> | undefined, lang?: string): string {
@@ -107,6 +115,8 @@ export class MangaDexProvider implements SourceProvider {
   type = 'official_api' as const;
   supportsSearch = true;
   supportsReading = true;
+  // JSON API: an empty feed really means "nothing readable in this language".
+  trustEmptyChapters = true;
 
   async trending(options?: SearchOptions): Promise<MangaSearchResult[]> {
     const p = new URLSearchParams();
@@ -116,8 +126,8 @@ export class MangaDexProvider implements SourceProvider {
     p.append('contentRating[]', 'safe');
     p.append('contentRating[]', 'suggestive');
     p.append('hasAvailableChapters', 'true');
-    if (options?.lang) p.append('availableTranslatedLanguage[]', options.lang);
-    const data = await getJSON<{ data: MdManga[] }>(`${API}/manga?${p}`);
+    for (const l of wantedLangs(options, this.languages)) p.append('availableTranslatedLanguage[]', l);
+    const data = await getJSON<{ data: MdManga[] }>(`${API}/manga?${p}`, options?.signal);
     return data.data.map(toResult);
   }
 
@@ -125,13 +135,16 @@ export class MangaDexProvider implements SourceProvider {
     const p = new URLSearchParams();
     p.set('title', query);
     p.set('limit', String(options?.limit ?? 24));
+    // Best title match first (the API's default order is "recently updated").
+    p.append('order[relevance]', 'desc');
     p.append('includes[]', 'cover_art');
     p.append('contentRating[]', 'safe');
     p.append('contentRating[]', 'suggestive');
     // Skip titles with no readable chapters (licensed/empty) — trending already does this.
     p.append('hasAvailableChapters', 'true');
-    if (options?.lang) p.append('availableTranslatedLanguage[]', options.lang);
-    const data = await getJSON<{ data: MdManga[] }>(`${API}/manga?${p}`);
+    // Only titles readable in the user's languages (MangaDex hosts dozens).
+    for (const l of wantedLangs(options, this.languages)) p.append('availableTranslatedLanguage[]', l);
+    const data = await getJSON<{ data: MdManga[] }>(`${API}/manga?${p}`, options?.signal);
     return data.data.map(toResult);
   }
 
@@ -147,17 +160,17 @@ export class MangaDexProvider implements SourceProvider {
     p.append('contentRating[]', 'safe');
     p.append('contentRating[]', 'suggestive');
     p.append('hasAvailableChapters', 'true');
-    if (options?.lang) p.append('availableTranslatedLanguage[]', options.lang);
-    const data = await getJSON<{ data: MdManga[] }>(`${API}/manga?${p}`);
+    for (const l of wantedLangs(options, this.languages)) p.append('availableTranslatedLanguage[]', l);
+    const data = await getJSON<{ data: MdManga[] }>(`${API}/manga?${p}`, options?.signal);
     return data.data.map(toResult);
   }
 
-  async getMangaDetails(externalId: string): Promise<MangaDetails> {
+  async getMangaDetails(externalId: string, options?: CallOptions): Promise<MangaDetails> {
     const p = new URLSearchParams();
     p.append('includes[]', 'cover_art');
     p.append('includes[]', 'author');
     p.append('includes[]', 'artist');
-    const data = await getJSON<{ data: MdManga }>(`${API}/manga/${externalId}?${p}`);
+    const data = await getJSON<{ data: MdManga }>(`${API}/manga/${externalId}?${p}`, options?.signal);
     const manga = data.data;
     const authors = manga.relationships
       .filter((r) => r.type === 'author' || r.type === 'artist')
@@ -172,8 +185,10 @@ export class MangaDexProvider implements SourceProvider {
     };
   }
 
-  async getChapters(externalId: string, lang = 'en'): Promise<Chapter[]> {
-    const limit = 100;
+  async getChapters(externalId: string, lang = 'en', options?: CallOptions): Promise<Chapter[]> {
+    // 500 is the feed endpoint's max page size: a 2000-entry series is 4
+    // requests instead of 20.
+    const limit = 500;
     const feedUrl = (offset: number) => {
       const p = new URLSearchParams();
       p.set('limit', String(limit));
@@ -187,13 +202,15 @@ export class MangaDexProvider implements SourceProvider {
       return `${API}/manga/${externalId}/feed?${p}`;
     };
 
-    // Fetch page 1 to learn the total, then pull the rest in PARALLEL — a
-    // 1000-chapter series loads in one round-trip instead of ten.
-    const first = await getJSON<{ data: MdChapter[]; total: number }>(feedUrl(0));
+    // Fetch page 1 to learn the total, then the rest a few at a time. No cap
+    // below the API's own offset+limit ≤ 10000 window: the feed is oldest-first,
+    // so a cap would silently drop the NEWEST chapters of long series.
+    const signal = options?.signal;
+    const first = await getJSON<{ data: MdChapter[]; total: number }>(feedUrl(0), signal);
     const offsets: number[] = [];
-    for (let o = limit; o < first.total && o < limit * 20; o += limit) offsets.push(o);
-    const rest = await Promise.all(
-      offsets.map((o) => getJSON<{ data: MdChapter[]; total: number }>(feedUrl(o))),
+    for (let o = limit; o < first.total && o + limit <= 10_000; o += limit) offsets.push(o);
+    const rest = await mapLimit(offsets, 3, (o) =>
+      getJSON<{ data: MdChapter[]; total: number }>(feedUrl(o), signal),
     );
 
     const all: Chapter[] = [];
@@ -217,11 +234,11 @@ export class MangaDexProvider implements SourceProvider {
     return all;
   }
 
-  async getChapterPages(chapterId: string): Promise<ChapterPage[]> {
+  async getChapterPages(chapterId: string, options?: CallOptions): Promise<ChapterPage[]> {
     const data = await getJSON<{
       baseUrl: string;
       chapter: { hash: string; data: string[] };
-    }>(`${API}/at-home/server/${chapterId}`);
+    }>(`${API}/at-home/server/${chapterId}`, options?.signal);
     const { baseUrl } = data;
     const { hash, data: files } = data.chapter;
     return files.map((file, index) => ({

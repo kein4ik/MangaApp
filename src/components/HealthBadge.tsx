@@ -9,6 +9,8 @@ const META: Record<SourceStatus, { label: string; color: string }> = {
   slow: { label: 'slow', color: colors.warning },
   broken: { label: 'down', color: colors.danger },
   disabled: { label: 'off', color: colors.textFaint },
+  // Not contacted yet this session — no claim either way.
+  unknown: { label: 'not checked', color: colors.textFaint },
 };
 
 export function HealthDot({ status }: { status: SourceStatus }) {

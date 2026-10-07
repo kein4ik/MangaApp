@@ -1,7 +1,7 @@
 /**
  * EN↔RU genre-name bridge for cross-language genre browse. Each provider's
  * genre index speaks ONE language (MangaDex/Mangapill/MangaKatana tags are
- * English, MangaLib/Remanga/Mangabuff are Russian), so before querying a
+ * English, MangaLib/Remanga are Russian), so before querying a
  * provider we translate the genre into its tag language. Unknown names return
  * null and that provider is simply skipped — better no results than a source
  * silently ignoring the filter and returning its whole unfiltered catalog.
@@ -58,7 +58,7 @@ const RU2EN = new Map(
 const hasCyrillic = (s: string) => /[а-яё]/i.test(s);
 
 /** Sources whose genre index uses Russian names; everything else is English. */
-const RU_TAG_SOURCES = new Set(['mangalib', 'remanga', 'mangabuff']);
+const RU_TAG_SOURCES = new Set(['mangalib', 'remanga']);
 
 export const tagLanguageOf = (sourceId: string): 'en' | 'ru' =>
   RU_TAG_SOURCES.has(sourceId) ? 'ru' : 'en';

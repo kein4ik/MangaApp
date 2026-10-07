@@ -1,6 +1,9 @@
-import { fetchWithTimeout } from '../http';
+import { mapLimit } from '@/lib/pool';
+
+import { fetchJSON } from '../http';
 import type { SourceProvider } from '../SourceProvider';
 import type {
+  CallOptions,
   Chapter,
   ChapterPage,
   MangaDetails,
@@ -42,11 +45,12 @@ type RmTitle = {
 type RmChapter = { id: number; chapter?: string; tome?: number; name?: string; is_paid?: boolean };
 type RmPage = { link: string; height?: number; width?: number };
 
-async function getJSON<T>(url: string): Promise<T> {
-  const res = await fetchWithTimeout(url, { headers: HEADERS });
-  if (!res.ok) throw new Error(`Remanga ${res.status}`);
-  return (await res.json()) as T;
-}
+const getJSON = <T>(url: string, signal?: AbortSignal) =>
+  fetchJSON<T>(url, { headers: HEADERS, signal, label: 'Remanga' });
+
+const CHAPTER_PAGE_SIZE = 100;
+// Safety net only (10k chapters) — the real stop is an empty/short page.
+const MAX_CHAPTER_PAGES = 100;
 
 function mapStatus(id?: number): MangaStatus {
   switch (id) {
@@ -117,12 +121,15 @@ export class RemangaProvider implements SourceProvider {
   type = 'scraper' as const;
   supportsSearch = true;
   supportsReading = true;
+  // JSON API: an empty branch list is a real answer, not a parsing miss.
+  trustEmptyChapters = true;
 
   async trending(options?: SearchOptions): Promise<MangaSearchResult[]> {
     const count = Math.min(options?.limit ?? 30, 30);
     const ordering = options?.sort === 'latest' ? '-chapter_date' : '-rating';
     const data = await getJSON<{ content: RmTitle[] }>(
       `${API}/search/catalog/?ordering=${ordering}&count=${count}&page=1`,
+      options?.signal,
     );
     return data.content.map(toResult);
   }
@@ -131,6 +138,7 @@ export class RemangaProvider implements SourceProvider {
     const count = options?.limit ?? 30;
     const data = await getJSON<{ content: RmTitle[] }>(
       `${API}/search/?query=${encodeURIComponent(query)}&count=${count}&page=1`,
+      options?.signal,
     );
     return data.content.map(toResult);
   }
@@ -145,17 +153,21 @@ export class RemangaProvider implements SourceProvider {
     const ordering = options?.sort === 'latest' ? '-chapter_date' : '-rating';
     const data = await getJSON<{ content: RmTitle[] }>(
       `${API}/search/catalog/?genres=${id}&ordering=${ordering}&count=${count}&page=1`,
+      options?.signal,
     );
     return data.content.map(toResult);
   }
 
-  private async detail(dir: string): Promise<RmTitle> {
-    const data = await getJSON<{ content: RmTitle }>(`${API}/titles/${encodeURIComponent(dir)}/`);
+  private async detail(dir: string, signal?: AbortSignal): Promise<RmTitle> {
+    const data = await getJSON<{ content: RmTitle }>(
+      `${API}/titles/${encodeURIComponent(dir)}/`,
+      signal,
+    );
     return data.content;
   }
 
-  async getMangaDetails(externalId: string): Promise<MangaDetails> {
-    const t = await this.detail(externalId);
+  async getMangaDetails(externalId: string, options?: CallOptions): Promise<MangaDetails> {
+    const t = await this.detail(externalId, options?.signal);
     const authors = Array.isArray(t.publishers)
       ? t.publishers.map((p) => p.name).filter(Boolean)
       : undefined;
@@ -169,33 +181,55 @@ export class RemangaProvider implements SourceProvider {
     };
   }
 
-  async getChapters(externalId: string): Promise<Chapter[]> {
-    const t = await this.detail(externalId);
+  async getChapters(externalId: string, _lang?: string, options?: CallOptions): Promise<Chapter[]> {
+    const signal = options?.signal;
+    const t = await this.detail(externalId, signal);
     const branches = t.branches ?? [];
     if (branches.length === 0) return [];
     const branch = branches.reduce((a, b) =>
       (b.total_chapters ?? 0) > (a.total_chapters ?? 0) ? b : a,
     );
+    const fetchPage = async (page: number) =>
+      (
+        await getJSON<{ content: RmChapter[] }>(
+          `${API}/titles/chapters/?branch_id=${branch.id}&count=${CHAPTER_PAGE_SIZE}&ordering=index&page=${page}`,
+          signal,
+        )
+      ).content ?? [];
+
+    // The branch reports its size, so the known pages load a few at a time
+    // (the API caps a page at 100, oldest first — a 3000-chapter manhua used
+    // to lose its NEWEST chapters past 1200)…
+    const knownPages = Math.min(
+      Math.max(1, Math.ceil((branch.total_chapters ?? 0) / CHAPTER_PAGE_SIZE)),
+      MAX_CHAPTER_PAGES,
+    );
+    const chunks = await mapLimit(
+      Array.from({ length: knownPages }, (_, i) => i + 1),
+      4,
+      fetchPage,
+    );
+    // …and anything beyond a stale count is picked up page by page.
+    let last = chunks[chunks.length - 1];
+    for (let page = knownPages + 1; last.length === CHAPTER_PAGE_SIZE && page <= MAX_CHAPTER_PAGES; page++) {
+      last = await fetchPage(page);
+      chunks.push(last);
+    }
+
     const all: Chapter[] = [];
-    for (let page = 1; page <= 12; page++) {
-      const data = await getJSON<{ content: RmChapter[] }>(
-        `${API}/titles/chapters/?branch_id=${branch.id}&count=100&ordering=index&page=${page}`,
-      );
-      const chunk = data.content ?? [];
-      if (chunk.length === 0) break;
-      for (const ch of chunk) {
-        if (ch.is_paid) continue;
-        all.push({
-          sourceId: 'remanga',
-          externalId: String(ch.id),
-          mangaExternalId: externalId,
-          title: ch.name || undefined,
-          chapterNumber: ch.chapter,
-          volume: ch.tome != null ? String(ch.tome) : undefined,
-          language: 'ru',
-        });
-      }
-      if (chunk.length < 100) break;
+    const seen = new Set<number>();
+    for (const ch of chunks.flat()) {
+      if (ch.is_paid || seen.has(ch.id)) continue;
+      seen.add(ch.id);
+      all.push({
+        sourceId: 'remanga',
+        externalId: String(ch.id),
+        mangaExternalId: externalId,
+        title: ch.name || undefined,
+        chapterNumber: ch.chapter,
+        volume: ch.tome != null ? String(ch.tome) : undefined,
+        language: 'ru',
+      });
     }
     return all.sort((a, b) => {
       const va = Number(a.volume ?? 0) - Number(b.volume ?? 0);
@@ -204,9 +238,10 @@ export class RemangaProvider implements SourceProvider {
     });
   }
 
-  async getChapterPages(chapterId: string): Promise<ChapterPage[]> {
+  async getChapterPages(chapterId: string, options?: CallOptions): Promise<ChapterPage[]> {
     const data = await getJSON<{ content: { pages?: (RmPage | RmPage[])[] } }>(
       `${API}/titles/chapters/${chapterId}/`,
+      options?.signal,
     );
     const raw = data.content.pages ?? [];
     const flat: RmPage[] = [];

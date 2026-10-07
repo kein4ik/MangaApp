@@ -1,6 +1,7 @@
-import { fetchWithTimeout } from '../http';
+import { delay, fetchJSON, HttpError, isAbortError } from '../http';
 import type { SourceProvider } from '../SourceProvider';
 import type {
+  CallOptions,
   Chapter,
   ChapterPage,
   MangaDetails,
@@ -56,46 +57,42 @@ type MlChapter = {
 };
 type MlPage = { url: string; height?: number; width?: number };
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-class HttpStatusError extends Error {
-  constructor(public status: number) {
-    super(`MangaLib ${status}`);
-  }
-}
-
 /** One host attempt with a single short-backoff retry on 429/5xx (rate limits). */
-async function fetchHost<T>(base: string, path: string): Promise<T> {
+async function fetchHost<T>(base: string, path: string, signal?: AbortSignal): Promise<T> {
   for (let attempt = 0; ; attempt++) {
-    const res = await fetchWithTimeout(`${base}${path}`, { headers: HEADERS });
-    if (res.ok) return (await res.json()) as T;
-    if (attempt === 0 && (res.status === 429 || res.status >= 500)) {
-      await sleep(1500);
-      continue;
+    try {
+      return await fetchJSON<T>(`${base}${path}`, { headers: HEADERS, signal, label: 'MangaLib' });
+    } catch (e) {
+      if (attempt === 0 && e instanceof HttpError && (e.status === 429 || e.status >= 500)) {
+        await delay(1500, signal);
+        continue;
+      }
+      throw e;
     }
-    throw new HttpStatusError(res.status);
   }
 }
 
 let preferredHost = 0;
 
 /** Fetch with host failover — `path` starts with '/', e.g. `/manga?...`. */
-async function getJSON<T>(path: string): Promise<T> {
+async function getJSON<T>(path: string, signal?: AbortSignal): Promise<T> {
   let lastError: unknown;
   for (let i = 0; i < API_HOSTS.length; i++) {
     const idx = (preferredHost + i) % API_HOSTS.length;
     try {
-      const data = await fetchHost<T>(API_HOSTS[idx], path);
+      const data = await fetchHost<T>(API_HOSTS[idx], path, signal);
       preferredHost = idx;
       return data;
     } catch (e) {
+      // A cancelled request isn't a host problem — don't try the mirror.
+      if (isAbortError(e)) throw e;
       // Surfaced in the Metro terminal so a device-only failure is debuggable.
       if (__DEV__) {
         console.warn(`[mangalib] ${API_HOSTS[idx]}${path.slice(0, 60)} → ${String(e)}`);
       }
       // A definitive client answer (404 etc.) is the same on every mirror —
       // only fail over on network errors, rate limits and 5xx.
-      if (e instanceof HttpStatusError && e.status !== 429 && e.status < 500) throw e;
+      if (e instanceof HttpError && e.status !== 429 && e.status < 500) throw e;
       lastError = e;
     }
   }
@@ -183,12 +180,14 @@ export class MangaLibProvider implements SourceProvider {
   type = 'scraper' as const;
   supportsSearch = true;
   supportsReading = true;
+  // JSON API: `data: []` is a real answer (licensed or 18+ login-walled).
+  trustEmptyChapters = true;
 
   async trending(options?: SearchOptions): Promise<MangaSearchResult[]> {
     const p = new URLSearchParams();
     p.append('site_id[]', SITE_ID);
     p.set('sort_by', options?.sort === 'latest' ? 'last_chapter_at' : 'views');
-    const data = await getJSON<{ data: MlManga[] }>(`/manga?${p}`);
+    const data = await getJSON<{ data: MlManga[] }>(`/manga?${p}`, options?.signal);
     return data.data.slice(0, options?.limit ?? 30).map(toResult);
   }
 
@@ -196,7 +195,7 @@ export class MangaLibProvider implements SourceProvider {
     const p = new URLSearchParams();
     p.set('q', query);
     p.append('site_id[]', SITE_ID);
-    const data = await getJSON<{ data: MlManga[] }>(`/manga?${p}`);
+    const data = await getJSON<{ data: MlManga[] }>(`/manga?${p}`, options?.signal);
     return data.data.slice(0, options?.limit ?? 30).map(toResult);
   }
 
@@ -208,11 +207,11 @@ export class MangaLibProvider implements SourceProvider {
     p.append('site_id[]', SITE_ID);
     p.append('genres[]', id);
     p.set('sort_by', options?.sort === 'latest' ? 'last_chapter_at' : 'views');
-    const data = await getJSON<{ data: MlManga[] }>(`/manga?${p}`);
+    const data = await getJSON<{ data: MlManga[] }>(`/manga?${p}`, options?.signal);
     return data.data.slice(0, options?.limit ?? 30).map(toResult);
   }
 
-  async getMangaDetails(externalId: string): Promise<MangaDetails> {
+  async getMangaDetails(externalId: string, options?: CallOptions): Promise<MangaDetails> {
     const p = new URLSearchParams();
     // NOTE: fields[] is validated by the API — an unknown name 422s the whole
     // request (asking for ageRestriction broke every details load once).
@@ -220,6 +219,7 @@ export class MangaLibProvider implements SourceProvider {
     ['summary', 'authors', 'genres', 'status_id'].forEach((f) => p.append('fields[]', f));
     const data = await getJSON<{ data: MlManga }>(
       `/manga/${encodeURIComponent(externalId)}?${p}`,
+      options?.signal,
     );
     const m = data.data;
     return {
@@ -232,11 +232,14 @@ export class MangaLibProvider implements SourceProvider {
     };
   }
 
-  async getChapters(externalId: string): Promise<Chapter[]> {
+  async getChapters(externalId: string, _lang?: string, options?: CallOptions): Promise<Chapter[]> {
     const data = await getJSON<{ data: MlChapter[] }>(
       `/manga/${encodeURIComponent(externalId)}/chapters`,
+      options?.signal,
     );
-    if (!Array.isArray(data.data)) return [];
+    // An unexpected shape is an error, not "no chapters" (which would get the
+    // title remembered as dead for days).
+    if (!Array.isArray(data.data)) throw new Error('MangaLib: unexpected chapters response');
     return data.data.map((ch) => {
       const branch = ch.branches?.[0];
       const branchId = branch?.branch_id ?? '';
@@ -253,7 +256,7 @@ export class MangaLibProvider implements SourceProvider {
     });
   }
 
-  async getChapterPages(chapterId: string): Promise<ChapterPage[]> {
+  async getChapterPages(chapterId: string, options?: CallOptions): Promise<ChapterPage[]> {
     const [slug, volume, number, branchId] = chapterId.split(CHID_SEP);
     const p = new URLSearchParams();
     p.set('number', number);
@@ -262,6 +265,7 @@ export class MangaLibProvider implements SourceProvider {
     const [data, server] = await Promise.all([
       getJSON<{ data: { pages?: MlPage[] } }>(
         `/manga/${encodeURIComponent(slug)}/chapter?${p}`,
+        options?.signal,
       ),
       imageServer(),
     ]);

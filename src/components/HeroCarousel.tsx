@@ -1,142 +1,53 @@
-import { Image } from 'expo-image';
-import { LinearGradient } from 'expo-linear-gradient';
 import { useEffect, useRef, useState } from 'react';
-import {
-  Dimensions,
-  FlatList,
-  Pressable,
-  StyleSheet,
-  Text,
-  View,
-  type NativeScrollEvent,
-  type NativeSyntheticEvent,
-} from 'react-native';
-
-import { imageSource } from '@/lib/imageSource';
+import { AppState, FlatList, StyleSheet, View, useWindowDimensions, type NativeScrollEvent, type NativeSyntheticEvent } from 'react-native';
 import type { MangaSearchResult } from '@/data/sources/types';
-import { colors, radius, spacing } from '@/theme/colors';
-import { typography } from '@/theme/typography';
+import { colors, spacing } from '@/theme/colors';
+import { FeaturedManga } from './FeaturedManga';
 
-const W = Dimensions.get('window').width;
-const HEIGHT = 360;
-const INTERVAL = 4500;
-
-type Props = {
-  items: MangaSearchResult[];
-  topInset: number;
-  onOpen: (manga: MangaSearchResult) => void;
-};
-
-/** Auto-rotating, swipeable featured banner at the top of Home. */
-export function HeroCarousel({ items, topInset, onOpen }: Props) {
-  const listRef = useRef<FlatList<MangaSearchResult>>(null);
+export function HeroCarousel({ items, onOpen, paused = false }: {
+  items: MangaSearchResult[]; onOpen: (manga: MangaSearchResult) => void; paused?: boolean;
+}) {
+  const { width } = useWindowDimensions();
+  const list = useRef<FlatList<MangaSearchResult>>(null);
   const indexRef = useRef(0);
   const [index, setIndex] = useState(0);
-
-  // Auto-advance; reads the live index from a ref to dodge stale closures.
+  const [active, setActive] = useState(AppState.currentState === 'active');
   useEffect(() => {
-    if (items.length < 2) return;
+    const sub = AppState.addEventListener('change', state => setActive(state === 'active'));
+    return () => sub.remove();
+  }, []);
+  const signature = items.map(m => m.sourceId + ':' + m.externalId).join('|');
+  useEffect(() => {
+    indexRef.current = 0; setIndex(0);
+    list.current?.scrollToOffset({ offset: 0, animated: false });
+  }, [signature, width]);
+  useEffect(() => {
+    if (paused || !active || items.length < 2) return;
     const timer = setInterval(() => {
       const next = (indexRef.current + 1) % items.length;
-      listRef.current?.scrollToOffset({ offset: next * W, animated: true });
-      indexRef.current = next;
-      setIndex(next);
-    }, INTERVAL);
+      list.current?.scrollToOffset({ offset: next * width, animated: true });
+      indexRef.current = next; setIndex(next);
+    }, 4500);
     return () => clearInterval(timer);
-  }, [items.length]);
-
-  const onMomentumEnd = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const i = Math.round(e.nativeEvent.contentOffset.x / W);
-    indexRef.current = i;
-    setIndex(i);
+  }, [paused, active, items.length, width]);
+  const onScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const next = Math.round(e.nativeEvent.contentOffset.x / width);
+    indexRef.current = next; setIndex(next);
   };
-
-  return (
-    <View>
-      <FlatList
-        ref={listRef}
-        data={items}
-        keyExtractor={(m) => m.externalId}
-        horizontal
-        pagingEnabled
-        showsHorizontalScrollIndicator={false}
-        onMomentumScrollEnd={onMomentumEnd}
-        renderItem={({ item }) => (
-          <Pressable onPress={() => onOpen(item)} style={styles.slide}>
-            {item.coverUrl && (
-              <Image
-                source={imageSource(item.coverUrl)}
-                style={StyleSheet.absoluteFill}
-                contentFit="cover"
-                transition={250}
-              />
-            )}
-            <LinearGradient
-              colors={['rgba(14,11,26,0.05)', 'rgba(14,11,26,0.55)', colors.bg]}
-              locations={[0, 0.6, 1]}
-              style={StyleSheet.absoluteFill}
-            />
-            <View style={[styles.content, { paddingTop: topInset + spacing.sm }]}>
-              <View style={styles.tag}>
-                <Text style={styles.tagText}>★ Featured</Text>
-              </View>
-              <Text style={styles.title} numberOfLines={2}>
-                {item.title}
-              </Text>
-              <View style={styles.cta}>
-                <Text style={styles.ctaText}>Read now ›</Text>
-              </View>
-            </View>
-          </Pressable>
-        )}
-      />
-
-      <View style={styles.dots}>
-        {items.map((m, i) => (
-          <View key={m.externalId} style={[styles.dot, i === index && styles.dotActive]} />
-        ))}
-      </View>
-    </View>
-  );
+  return <View>
+    <FlatList ref={list} data={items} horizontal pagingEnabled showsHorizontalScrollIndicator={false}
+      keyExtractor={m => m.sourceId + ':' + m.externalId} onMomentumScrollEnd={onScroll}
+      getItemLayout={(_, itemIndex) => ({ length: width, offset: itemIndex * width, index: itemIndex })}
+      removeClippedSubviews={false}
+      initialNumToRender={1} maxToRenderPerBatch={2} windowSize={3}
+      renderItem={({ item }) => <View style={{ width, paddingHorizontal: spacing.lg }}>
+        <FeaturedManga manga={item} onPress={() => onOpen(item)} />
+      </View>} />
+    <View style={styles.dots}>{items.map((m, i) => <View key={m.sourceId + ':' + m.externalId} style={[styles.dot, i === index && styles.active]} />)}</View>
+  </View>;
 }
-
 const styles = StyleSheet.create({
-  slide: {
-    width: W,
-    height: HEIGHT,
-    justifyContent: 'flex-end',
-    backgroundColor: colors.card,
-  },
-  content: { padding: spacing.lg, gap: spacing.sm },
-  tag: {
-    alignSelf: 'flex-start',
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 3,
-    borderRadius: radius.sm,
-    backgroundColor: colors.accent,
-  },
-  tagText: { ...typography.tiny, color: '#1A0E06', fontWeight: '800' },
-  title: { ...typography.h1, color: '#fff', maxWidth: '92%' },
-  cta: {
-    alignSelf: 'flex-start',
-    marginTop: spacing.sm,
-    paddingHorizontal: spacing.xl,
-    paddingVertical: spacing.sm,
-    borderRadius: radius.pill,
-    backgroundColor: colors.accent,
-  },
-  ctaText: { ...typography.bodyStrong, color: '#1A0E06' },
-  dots: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    gap: 6,
-    marginTop: spacing.md,
-  },
-  dot: {
-    width: 6,
-    height: 6,
-    borderRadius: radius.pill,
-    backgroundColor: colors.border,
-  },
-  dotActive: { backgroundColor: colors.accent, width: 18 },
+  dots: { flexDirection: 'row', justifyContent: 'center', gap: 6, marginTop: 12 },
+  dot: { width: 6, height: 6, borderRadius: 4, backgroundColor: colors.border },
+  active: { width: 20, backgroundColor: colors.accent },
 });

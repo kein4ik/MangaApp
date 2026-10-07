@@ -1,5 +1,7 @@
-import { Image } from 'expo-image';
-import { useFocusEffect } from 'expo-router';
+import { useQueryClient } from '@tanstack/react-query';
+import { Ionicons } from '@expo/vector-icons';
+import { CoverArt } from '@/components/CoverArt';
+import { useFocusEffect, useIsFocused } from 'expo-router';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
@@ -16,6 +18,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { HeroCarousel } from '@/components/HeroCarousel';
 import { FilterToggle, type HistoryFilter } from '@/components/FilterToggle';
 import { MangaCard } from '@/components/MangaCard';
+import { RailSkeleton } from '@/components/Skeleton';
 import { SourceLangBar } from '@/components/SourceLangBar';
 import { useContinueReading, useForYou, useTrending } from '@/data/queries';
 import { useGuardedRouter } from '@/lib/useGuardedRouter';
@@ -36,14 +39,26 @@ export default function HomeScreen() {
   const latest = useTrending(selectedSourceId, language, 'latest');
   const continueReading = useContinueReading();
 
-  // "For you" is heavy (multi-source fetch + HTML parsing) — hold it until the
-  // screen has rendered and settled so it never competes with first taps.
+  // Home stays mounted under every pushed screen (manga page, reader), so all
+  // of its background work is tied to it actually being on screen.
+  const focused = useIsFocused();
+
+  // "For you" is heavy (multi-source fetch + HTML parsing), so it only runs
+  // while Home is on screen and has settled: never competing with first taps or
+  // with the screen the user moved on to. Leaving Home stops a fetch still in
+  // flight; library edits made elsewhere refresh it on the way back.
   // (Plain timer: InteractionManager is deprecated in this RN version.)
+  const qc = useQueryClient();
   const [discoveryReady, setDiscoveryReady] = useState(false);
   useEffect(() => {
+    if (!focused) {
+      setDiscoveryReady(false);
+      qc.cancelQueries({ queryKey: ['for-you'] });
+      return;
+    }
     const timer = setTimeout(() => setDiscoveryReady(true), 1500);
     return () => clearTimeout(timer);
-  }, []);
+  }, [focused, qc]);
   const forYou = useForYou(enabledLanguages, hiddenSources, discoveryReady);
 
   // Refresh "Continue reading" whenever Home regains focus (e.g. after reading
@@ -81,15 +96,15 @@ export default function HomeScreen() {
 
   return (
     <View style={styles.screen}>
-    {/* Slim header over the hero: app icon on the left, settings on the right. */}
-    <View style={[styles.topBar, { top: insets.top + spacing.sm }]} pointerEvents="box-none">
-      <Image source={require('../../assets/logo_app.png')} style={styles.logo} contentFit="contain" />
-      <Pressable style={styles.gear} onPress={() => router.push('/settings')} hitSlop={10}>
-        <Text style={styles.gearIcon}>⚙</Text>
-      </Pressable>
+    <View style={[styles.topBar, { paddingTop: insets.top + 10 }]}>
+      <Text style={styles.wordmark}>Manga<Text style={{ color: colors.accent }}>App</Text></Text>
+      <View style={styles.headerTools}><SourceLangBar />
+        <Pressable style={styles.searchButton} onPress={() => router.push('/explore')} accessibilityLabel="Search manga"><Ionicons name="search-outline" size={24} color={colors.text} /></Pressable>
+      </View>
     </View>
     <ScrollView
       style={styles.screen}
+      showsVerticalScrollIndicator={false}
       contentContainerStyle={{ paddingBottom: spacing.xxl }}
       refreshControl={
         <RefreshControl
@@ -105,9 +120,13 @@ export default function HomeScreen() {
       }
     >
       {heroItems.length > 0 ? (
-        <HeroCarousel items={heroItems} topInset={insets.top} onOpen={openManga} />
+        <HeroCarousel
+          items={heroItems}
+          onOpen={openManga}
+          paused={!focused}
+        />
       ) : (
-        <View style={[styles.heroPlaceholder, { paddingTop: insets.top }]}>
+        <View style={styles.heroPlaceholder}>
           {top.isError ? (
             <>
               <Text style={styles.errTitle}>{sourceMeta(selectedSourceId).name} is unavailable</Text>
@@ -124,7 +143,6 @@ export default function HomeScreen() {
         </View>
       )}
 
-      <SourceLangBar />
 
       {continueReading.data && continueReading.data.length > 0 && (
         <View style={styles.section}>
@@ -148,21 +166,15 @@ export default function HomeScreen() {
               showsHorizontalScrollIndicator={false}
               contentContainerStyle={styles.rail}
               renderItem={({ item }) => (
-                <MangaCard
-                  width={CARD_W}
-                  title={item.title}
-                  coverUrl={item.cover_url}
-                  subtitle={item.chapter_number ? `Ch. ${item.chapter_number}` : undefined}
-                  progress={item.percent}
-                  sourceLabel={sourceMeta(item.source_id).name}
-                  sourceColor={sourceMeta(item.source_id).color}
-                  onPress={() =>
-                    router.push({
-                      pathname: '/manga/[id]',
-                      params: { id: item.external_id, sourceId: item.source_id },
-                    })
-                  }
-                />
+                <Pressable style={styles.continueCard} onPress={() => router.push({ pathname: '/manga/[id]', params: { id: item.external_id, sourceId: item.source_id } })}>
+                  <CoverArt uri={item.cover_url} title={item.title} style={styles.continueCover} />
+                  <View style={styles.continueInfo}>
+                    <Text style={styles.continueTitle} numberOfLines={1}>{item.title}</Text>
+                    <Text style={styles.continueMeta}>{item.chapter_number ? 'Ch. ' + item.chapter_number + ' · ' : ''}Page {item.page_index + 1}</Text>
+                    <View style={styles.progressTrack}><View style={[styles.progressFill, { width: ((Math.max(0, Math.min(1, item.percent)) * 100) + '%') as `${number}%` }]} /></View>
+                    <View style={styles.sourceLine}><View style={[styles.sourceDot, { backgroundColor: sourceMeta(item.source_id).color }]} /><Text style={styles.continueMeta}>{sourceMeta(item.source_id).name}</Text></View>
+                  </View>
+                </Pressable>
               )}
             />
           )}
@@ -180,7 +192,7 @@ export default function HomeScreen() {
               onPress={() => router.push({ pathname: '/browse', params: { genre: rail.genre } })}
               hitSlop={8}
             >
-              <Text style={styles.seeAll}>see all</Text>
+              <Text style={styles.seeAll}>See all</Text>
             </Pressable>
           </View>
           <FlatList
@@ -193,6 +205,8 @@ export default function HomeScreen() {
               <MangaCard
                 width={CARD_W}
                 title={item.primary.title}
+                sourceLabel={sourceMeta(item.primary.sourceId).name}
+                sourceColor={sourceMeta(item.primary.sourceId).color}
                 coverUrl={item.primary.coverUrl}
                 onPress={() => openManga(item.primary)}
               />
@@ -208,11 +222,11 @@ export default function HomeScreen() {
             onPress={() => router.push({ pathname: '/top', params: { sort: 'popular' } })}
             hitSlop={8}
           >
-            <Text style={styles.seeAll}>see all</Text>
+            <Text style={styles.seeAll}>See all</Text>
           </Pressable>
         </View>
         {top.isLoading ? (
-          <ActivityIndicator color={colors.accent} style={{ marginVertical: spacing.xl }} />
+          <RailSkeleton width={CARD_W} />
         ) : (
           <FlatList
             horizontal
@@ -232,11 +246,11 @@ export default function HomeScreen() {
             onPress={() => router.push({ pathname: '/top', params: { sort: 'latest' } })}
             hitSlop={8}
           >
-            <Text style={styles.seeAll}>see all</Text>
+            <Text style={styles.seeAll}>See all</Text>
           </Pressable>
         </View>
         {latest.isLoading ? (
-          <ActivityIndicator color={colors.accent} style={{ marginVertical: spacing.xl }} />
+          <RailSkeleton width={CARD_W} />
         ) : (
           <FlatList
             horizontal
@@ -255,38 +269,31 @@ export default function HomeScreen() {
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg },
-  topBar: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    zIndex: 10,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: spacing.lg,
-  },
-  logo: { width: 40, height: 40, borderRadius: 10 },
-  gear: {
-    width: 38,
-    height: 38,
-    borderRadius: radius.pill,
-    backgroundColor: 'rgba(0,0,0,0.45)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  gearIcon: { color: '#fff', fontSize: 18 },
+  topBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: spacing.lg, paddingBottom: 16, gap: 10 },
+  wordmark: { fontSize: 23, letterSpacing: -1, fontWeight: '800', color: colors.text },
+  headerTools: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 1 },
+  searchButton: { width: 40, height: 44, alignItems: 'center', justifyContent: 'center' },
+  continueCard: { width: 310, padding: 12, borderRadius: 18, backgroundColor: colors.card, flexDirection: 'row', gap: 12 },
+  continueCover: { width: 58, height: 84, borderRadius: 9 },
+  continueInfo: { flex: 1, justifyContent: 'center', gap: 5 },
+  continueTitle: { ...typography.bodyStrong, color: colors.text },
+  continueMeta: { ...typography.caption, color: colors.textMuted },
+  progressTrack: { height: 4, backgroundColor: colors.border, borderRadius: 3, overflow: 'hidden', marginVertical: 2 },
+  progressFill: { height: '100%', backgroundColor: colors.accent, borderRadius: 3 },
+  sourceLine: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  sourceDot: { width: 6, height: 6, borderRadius: 3 },
   heroPlaceholder: {
     height: 240,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: colors.card,
+    backgroundColor: colors.card, marginHorizontal: spacing.lg, borderRadius: 22,
   },
   section: { marginTop: spacing.xl },
   sectionTitle: {
     ...typography.h3,
     color: colors.text,
     paddingHorizontal: spacing.lg,
-    marginBottom: spacing.md,
+    flex: 1,
   },
   sectionHeader: {
     flexDirection: 'row',

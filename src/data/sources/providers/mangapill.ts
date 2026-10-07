@@ -1,6 +1,7 @@
-import { fetchWithTimeout } from '../http';
+import { fetchText, UnexpectedPageError } from '../http';
 import type { SourceProvider } from '../SourceProvider';
 import type {
+  CallOptions,
   Chapter,
   ChapterPage,
   MangaDetails,
@@ -13,13 +14,29 @@ const REFERER = `${BASE}/`;
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36';
 
-async function getHTML(path: string): Promise<string> {
-  const res = await fetchWithTimeout(`${BASE}${path}`, { headers: { 'User-Agent': UA, Accept: 'text/html' } });
-  if (!res.ok) throw new Error(`Mangapill ${res.status}`);
-  return res.text();
-}
+const getHTML = (path: string, signal?: AbortSignal) =>
+  fetchText(`${BASE}${path}`, {
+    headers: { 'User-Agent': UA, Accept: 'text/html' },
+    signal,
+    label: 'Mangapill',
+  });
+
+/** Numeric attribute of an HTML tag (e.g. the page images' width/height). */
+const attrNum = (tag: string, name: string) => {
+  const n = Number(tag.match(new RegExp(`\\s${name}="([\\d.]+)"`))?.[1]);
+  return n > 0 ? n : undefined;
+};
 
 const stripTags = (s: string) => s.replace(/<[^>]+>/g, '').trim();
+
+/** Every real Mangapill page names the site in og:title; error pages don't. */
+const isMangapillPage = (html: string) => /property="og:title"\s+content="[^"]*Mangapill/.test(html);
+
+/** An empty parse is only "nothing found" when it came from a real page. */
+function checked<T>(items: T[], html: string): T[] {
+  if (!items.length && !isMangapillPage(html)) throw new UnexpectedPageError('Mangapill');
+  return items;
+}
 
 /** Titles from /manga/{id} anchors; covers matched by id in the filename /i/{id}. */
 function parseList(html: string): MangaSearchResult[] {
@@ -51,23 +68,29 @@ export class MangapillProvider implements SourceProvider {
   supportsReading = true;
 
   async trending(options?: SearchOptions): Promise<MangaSearchResult[]> {
-    return parseList(await getHTML('/')).slice(0, options?.limit ?? 30);
+    const list = parseList(await getHTML('/', options?.signal));
+    if (!list.length) throw new UnexpectedPageError('Mangapill');
+    return list.slice(0, options?.limit ?? 30);
   }
 
   async search(query: string, options?: SearchOptions): Promise<MangaSearchResult[]> {
-    const html = await getHTML(`/search?q=${encodeURIComponent(query)}`);
-    return parseList(html).slice(0, options?.limit ?? 30);
+    const html = await getHTML(`/search?q=${encodeURIComponent(query)}`, options?.signal);
+    return checked(parseList(html), html).slice(0, options?.limit ?? 30);
   }
 
   /** Real genre filter — the site's own genre links are `/search?genre=Name`. */
   async browseByGenre(genre: string, options?: SearchOptions): Promise<MangaSearchResult[]> {
-    const html = await getHTML(`/search?genre=${encodeURIComponent(genre.trim())}&page=1`);
-    return parseList(html).slice(0, options?.limit ?? 30);
+    const html = await getHTML(
+      `/search?genre=${encodeURIComponent(genre.trim())}&page=1`,
+      options?.signal,
+    );
+    return checked(parseList(html), html).slice(0, options?.limit ?? 30);
   }
 
-  async getMangaDetails(externalId: string): Promise<MangaDetails> {
-    const html = await getHTML(`/manga/${externalId}/_`);
+  async getMangaDetails(externalId: string, options?: CallOptions): Promise<MangaDetails> {
+    const html = await getHTML(`/manga/${externalId}/_`, options?.signal);
     const title = html.match(/<h1[^>]*>([^<]+)<\/h1>/)?.[1]?.trim();
+    if (!title || !isMangapillPage(html)) throw new UnexpectedPageError('Mangapill');
     const cover =
       html.match(/<meta property="og:image" content="([^"]+)"/)?.[1] ||
       html.match(/<img[^>]+data-src="([^"]+)"/)?.[1];
@@ -90,8 +113,8 @@ export class MangapillProvider implements SourceProvider {
     };
   }
 
-  async getChapters(externalId: string): Promise<Chapter[]> {
-    const html = await getHTML(`/manga/${externalId}/_`);
+  async getChapters(externalId: string, _lang?: string, options?: CallOptions): Promise<Chapter[]> {
+    const html = await getHTML(`/manga/${externalId}/_`, options?.signal);
     const chapters: Chapter[] = [];
     for (const m of html.matchAll(/<a[^>]+href="\/chapters\/([^/"]+)[^"]*"[^>]*>([^<]+)<\/a>/g)) {
       const label = m[2].trim();
@@ -107,19 +130,25 @@ export class MangapillProvider implements SourceProvider {
         language: 'en',
       });
     }
-    return chapters.reverse();
+    return checked(chapters, html).reverse();
   }
 
-  async getChapterPages(chapterId: string): Promise<ChapterPage[]> {
-    const html = await getHTML(`/chapters/${chapterId}/_`);
+  async getChapterPages(chapterId: string, options?: CallOptions): Promise<ChapterPage[]> {
+    const html = await getHTML(`/chapters/${chapterId}/_`, options?.signal);
     const pages: ChapterPage[] = [];
-    for (const m of html.matchAll(/<img[^>]+class="js-page"[^>]+data-src="([^"]+)"[^>]*>/g)) {
+    // Each page tag carries its real size (width="1066" height="1600").
+    for (const m of html.matchAll(/<img[^>]+class="js-page"[^>]*>/g)) {
+      const tag = m[0];
+      const url = tag.match(/data-src="([^"]+)"/)?.[1];
+      if (!url) continue;
       pages.push({
         index: pages.length,
-        imageUrl: m[1],
+        imageUrl: url,
+        width: attrNum(tag, 'width'),
+        height: attrNum(tag, 'height'),
         headers: { Referer: REFERER, 'User-Agent': UA },
       });
     }
-    return pages;
+    return checked(pages, html);
   }
 }

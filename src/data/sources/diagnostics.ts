@@ -1,3 +1,4 @@
+import { recordDiagnosis } from './health';
 import { SourceManager } from './registry';
 import type { SourceStatus } from './types';
 
@@ -69,5 +70,7 @@ export async function testSource(id: string): Promise<SourceDiag> {
   // removed manga) is shown but doesn't mark the whole source down.
   const reachable = steps[0]?.ok || steps[1]?.ok;
   const status: SourceStatus = !reachable ? 'broken' : ms > 7000 ? 'slow' : 'online';
+  // The source badges across the app show this until newer live traffic arrives.
+  recordDiagnosis(id, status);
   return { status, ms, steps };
 }
